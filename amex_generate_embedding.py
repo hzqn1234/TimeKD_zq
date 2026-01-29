@@ -59,7 +59,7 @@ class MSK(nn.Module):
         return output
 
 class GenPromptEmb(nn.Module):
-    def __init__(self, model_name="gpt2", num_nodes=223, device='cuda', d_model=768, l_layer=6, **kwargs):  
+    def __init__(self, model_name="gpt2", num_nodes=223, device='cuda', d_model=768, l_layer=6, feature_names=None, **kwargs):  
         super(GenPromptEmb, self).__init__()
         self.device, self.d_model, self.num_nodes = device, d_model, num_nodes
         self.tokenizer = GPT2Tokenizer.from_pretrained(model_name)
@@ -77,14 +77,29 @@ class GenPromptEmb(nn.Module):
         
         for param in self.sub_ac.parameters():
             param.requires_grad = False
-
+        
+        # --- DYNAMIC CATEGORY MAPPING ---
+        prefix_map = {'D': 'Delinquency', 'S': 'Spend', 'P': 'Payment', 'B': 'Balance', 'R': 'Risk'}
+        
+        self.node_cat_ids = []
+        for col in feature_names:
+            # Extract prefix: 'P_2' -> 'P' or 'oneHot_B_30_0.0' -> 'B'
+            prefix = col.split('_')[1][0] if col.startswith('oneHot') else col[0]
+            cat_str = prefix_map.get(prefix, 'Risk')
+            self.node_cat_ids.append(self.tokenizer.encode(cat_str, add_special_tokens=False))
+        
         # --- PRE-TOKENIZATION CACHE ---
-        # Tokenize static strings once during initialization
-        self.id_from = self.tokenizer.encode("From ", add_special_tokens=False)
+        self.id_gt_intro = self.tokenizer.encode("For a credit default risk prediction dataset, " \
+                                                 "Y label is whether the customer will default; " \
+                                                 "X variables are features in these categories: " \
+                                                 "Delinquency, Spend, Payment, Balance, Risk. " \
+                                                 "From ", add_special_tokens=False)
+        self.id_hd_intro = self.tokenizer.encode("From ", add_special_tokens=False)
         self.id_to = self.tokenizer.encode(" to ", add_special_tokens=False)
-        self.id_vals_prefix = self.tokenizer.encode(", the values were ", add_special_tokens=False)
+        self.id_vals_prefix = self.tokenizer.encode(", the values of a ", add_special_tokens=False)
+        self.id_vals_mid = self.tokenizer.encode(" variable were ", add_special_tokens=False)
         self.id_suffix_gt = self.tokenizer.encode(" every month. The value for Y label is ", add_special_tokens=False)
-        self.id_suffix_hd = self.tokenizer.encode(" every month. Forecast the value for Y label", add_special_tokens=False)
+        self.id_suffix_hd = self.tokenizer.encode(" every month. Forecast the value for Y label.", add_special_tokens=False)
 
     def _generate_mask_batch(self, input_ids):
         batch_size, seq_len = input_ids.shape
@@ -125,24 +140,30 @@ class GenPromptEmb(nn.Module):
                 
                 nodes_data = x[i].to(torch.int).cpu().numpy().T
 
-                for node_timeline in nodes_data:
-                    # While we join numbers here, we avoid tokenizing the rest of the sentence repetitively
+                for node_idx, node_timeline in enumerate(nodes_data):
+                    # Retrieve the pre-tokenized category for this specific node
+                    cat_ids = self.node_cat_ids[node_idx]
+                    
                     vals_str = ", ".join(map(str, node_timeline))
                     vals_ids = self.tokenizer.encode(vals_str, add_special_tokens=False)
 
-        # # --- PRE-TOKENIZATION CACHE ---
-        # # Tokenize static strings once during initialization
-        # self.id_from = self.tokenizer.encode("From ", add_special_tokens=False)
-        # self.id_to = self.tokenizer.encode(" to ", add_special_tokens=False)
-        # self.id_vals_prefix = self.tokenizer.encode(", the values were ", add_special_tokens=False)
-        # self.id_suffix_gt = self.tokenizer.encode(" every month. The value for Y label is ", add_special_tokens=False)
-        # self.id_suffix_hd = self.tokenizer.encode(" every month. Forecast the value for Y label", add_special_tokens=False)
-
                     # Concatenate pre-computed IDs with dynamic IDs
-                    # GT Sequence: [From] [T1] [to] [T2] [, values were] [VALS] [suffix_gt] [Y]
-                    gt_seq = self.id_from + t1_ids + self.id_to + t2_ids + self.id_vals_prefix + vals_ids + self.id_suffix_gt + y_label_ids
-                    # HD Sequence: [From] [T1] [to] [T2] [, values were] [VALS] [suffix_hd]
-                    hd_seq = self.id_from + t1_ids + self.id_to + t2_ids + self.id_vals_prefix + vals_ids + self.id_suffix_hd
+                    
+                    # GT Sequence: [Intro] [T1] [to] [T2] [, values of a] [CAT] [variable were] [VALS] [suffix_gt] [Y]
+                    # Sample GT: "For a credit default risk prediction dataset, Y label is whether the customer will default; 
+                    # X variables are features in these categories: Delinquency, Spend, Payment, Balance, Risk. 
+                    # From 2017-03-01 to 2018-03-01, the values of a Spend variable were 0.1, 0.2... every month. 
+                    # The value for Y label is 0"
+                    gt_seq = (self.id_gt_intro + t1_ids + self.id_to + t2_ids + 
+                            self.id_vals_prefix + cat_ids + self.id_vals_mid + 
+                            vals_ids + self.id_suffix_gt + y_label_ids)
+                    
+                    # HD Sequence: [Intro] [T1] [to] [T2] [, values of a] [CAT] [variable were] [VALS] [suffix_hd]
+                    # Sample HD: "From 2017-03-01 to 2018-03-01, the values of a Spend variable were 0.1, 0.2... every month. 
+                    # Forecast the value for Y label."
+                    hd_seq = (self.id_hd_intro + t1_ids + self.id_to + t2_ids + 
+                            self.id_vals_prefix + cat_ids + self.id_vals_mid + 
+                            vals_ids + self.id_suffix_hd)
 
                     all_gt_ids.append(torch.tensor(gt_seq))
                     all_hd_ids.append(torch.tensor(hd_seq))
