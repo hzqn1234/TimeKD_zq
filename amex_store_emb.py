@@ -125,6 +125,9 @@ def save_train_embeddings(args, train_test = 'train'):
         print(f'train_test: {train_test}')
         exit()
 
+    dynamic_feature_names = series.drop(['customer_ID', 'S_2'], axis=1).columns.tolist()
+    args.num_nodes = len(dynamic_feature_names)
+
     gen_prompt_emb = GenPromptEmb(
         # data_path=args.data_path,
         model_name=args.model_name,
@@ -134,9 +137,10 @@ def save_train_embeddings(args, train_test = 'train'):
         output_len=args.output_len,
         d_model=args.d_model,
         l_layer=args.l_layers,
+        feature_names=dynamic_feature_names,
     ).to(args.device)
 
-    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb/{train_test}/'
+    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_01/{train_test}/'
     os.makedirs(emb_path, exist_ok=True)
 
     # embeddings_list = []

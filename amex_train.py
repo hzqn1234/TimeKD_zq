@@ -53,6 +53,7 @@ def parse_args():
     parser.add_argument('--test', action='store_true', help='flag to test')
     parser.add_argument('--predict', action='store_true', help='flag to predict')
     parser.add_argument('--submit', action='store_true', help='flag to submit')
+    parser.add_argument("--emb_version", type=str, default="v1")
     
     parser.add_argument(
         "--es_patience",
@@ -253,7 +254,7 @@ def seed_it(seed):
 
 args = parse_args()
 INPUT_PATH  = f'../../000_data/amex/{args.data_type}_{args.sampling}'
-emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb/train/'
+emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_01/train/'
 print(f'INPUT_PATH: {INPUT_PATH}')
 print(f'emb_path: {emb_path}')
 
@@ -577,6 +578,7 @@ def create_log_df():
     log_df['seed'] = [args.seed]
     log_df['batch_size'] = [args.batch_size]  
     log_df['es_patience'] = [args.es_patience]  
+    log_df['emb_version'] = [args.emb_version]
     return log_df
 
 def save_log(log_type='train',log_df=None):
