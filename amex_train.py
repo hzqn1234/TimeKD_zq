@@ -54,6 +54,8 @@ def parse_args():
     parser.add_argument('--predict', action='store_true', help='flag to predict')
     parser.add_argument('--submit', action='store_true', help='flag to submit')
     parser.add_argument("--emb_version", type=str, default="v1")
+    parser.add_argument("--remark", type=str, default="")
+    
     
     parser.add_argument(
         "--es_patience",
@@ -579,6 +581,7 @@ def create_log_df():
     log_df['batch_size'] = [args.batch_size]  
     log_df['es_patience'] = [args.es_patience]  
     log_df['emb_version'] = [args.emb_version]
+    log_df['remark'] = [args.remark]
     return log_df
 
 def save_log(log_type='train',log_df=None):
@@ -595,7 +598,11 @@ if __name__ == "__main__":
         main_train()      
 
     if args.test:
-        main_test()
+        if args.data_type == 'original' and args.sampling == '100pct':
+            print('Skip Test for orginal_100pct')
+            pass
+        else:
+            main_test()
 
     if args.predict:
         log_df = main_test(is_predict=True)
