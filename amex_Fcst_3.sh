@@ -1,16 +1,12 @@
 #!/bin/sh
 
-#### SBATCH -o gpu-job-%j.output
 #SBATCH -o gpu-job-train-3.output
-#SBATCH -p PA100q
+#SBATCH -p RTXA6Kq
 #SBATCH --gpus-per-node=1
 
 #SBATCH -n 1
 #SBATCH -c 16
-#SBATCH -w node03
-
-# export PYTHONPATH=/path/to/project_root:$PYTHONPATH
-# export CUDA_LAUNCH_BLOCKING=1
+#SBATCH -w node15
 
 for lr in 1e-3 1e-4 1e-5 2e-3 2e-4 2e-5
 do
@@ -18,9 +14,9 @@ do
     for seed in 42
     do 
         echo "seed: "$seed
-        CUDA_VISIBLE_DEVICES=2 python amex_train.py \
+        CUDA_VISIBLE_DEVICES=0 python amex_train.py \
                                         --lrate $lr \
-                                        --sampling "10pct" \
+                                        --sampling "100pct" \
                                         --data_type "original" \
                                         --num_nodes 223 \
                                         --es_patience 3 \
@@ -31,10 +27,12 @@ do
                                         --submit \
                                         --batch_size 128 \
                                         --num_workers 16 \
-                                        --feature_w 0.000001\
+                                        --feature_w 0.01\
                                         --fcst_w 1\
-                                        --recon_w 0.000001\
-                                        --att_w 1\
+                                        --recon_w 0.5\
+                                        --att_w 0.01\
+                                        --emb_version "v2"\
+                                        --remark "only forecast loss"\
                                         --epochs 20 
     done
 done
