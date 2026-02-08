@@ -8,6 +8,7 @@ import random
 from torch.utils.data import DataLoader
 # from data_provider.data_loader_emb import Dataset_ETT_minute
 from model.TimeKD import Dual
+from model.CAI_model import Amodel
 from utils.kd_loss import KDLoss
 from utils.metrics import MSE, MAE, metric
 import faulthandler
@@ -196,11 +197,14 @@ class trainer:
         device,
         epochs
     ):
-        self.model = Dual(
-            device=device, channel=channel, num_nodes=num_nodes, seq_len=seq_len, pred_len=pred_len, 
-            dropout_n=dropout_n, d_llm=d_llm, e_layer=e_layer, head=head
-        )
-        
+        # self.model = Dual(
+        #     device=device, channel=channel, num_nodes=num_nodes, seq_len=seq_len, pred_len=pred_len, 
+        #     dropout_n=dropout_n, d_llm=d_llm, e_layer=e_layer, head=head
+        # )
+
+        # series_dim, feature_dim, target_num, hidden_num, hidden_dim, drop_rate=0.5, use_series_oof=False)
+        self.model = Amodel(223, 16, 1, 3, 128)
+
         self.optimizer = optim.AdamW(self.model.parameters(), lr=lrate, weight_decay=wdecay)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=min(epochs, 100), eta_min=1e-8, verbose=True)
         self.MSE = MSE
@@ -214,23 +218,27 @@ class trainer:
         print("The number of parameters: {}".format(self.model.param_num()))
         # print(self.model)
 
-    def train(self, x, y, emb):
+        self.model.to(self.device)
+
+    def train(self, x, y, emb, m=None):
         self.model.train()
         self.optimizer.zero_grad()
-        ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(x, emb)
+        # ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(x, emb)
+        ts_out = self.model(x,m)
         
         ## special handle in case of batch size = 1
         if x.shape[0] == 1:
             y =  torch.tensor([y]).to(device)
         
-        loss = self.criterion(ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att, y)
+        # loss = self.criterion(ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att, y)
+        loss = self.criterion(None, None, ts_out, None, None, None, y)
         loss.backward()
         if self.clip is not None:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip) 
         self.optimizer.step() 
         return loss.item(), ts_out
 
-    def eval(self, x, y, emb):
+    def eval(self, x, y, emb,m):
         self.model.eval()
 
         ## special handle in case of batch size = 1
@@ -238,8 +246,10 @@ class trainer:
             y =  torch.tensor([y]).to(device)
 
         with torch.no_grad():
-            ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(x, emb)
-            loss = self.criterion(ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att, y)
+            # ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(x, emb)
+            # loss = self.criterion(ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att, y)
+            ts_out = self.model(x,m)
+            loss = self.criterion(None, None, ts_out, None, None, None, y)
         return loss.item(), ts_out
 
 
@@ -335,13 +345,14 @@ def main_train():
             for _, data in enumerate(tqdm(train_dataloader)):
                 y = data['batch_y']
                 x = data['batch_series']
+                mask = data['batch_mask'].to(device)
                 emb_tensor = data['batch_emb_tensor']
 
                 trainx = torch.Tensor(x).to(device).float()
                 trainy = torch.Tensor(y).to(device).float()
                 emb = torch.Tensor(emb_tensor).to(device).float()
 
-                curr_train_loss, train_pred_y = engine.train(trainx, trainy, emb)
+                curr_train_loss, train_pred_y = engine.train(trainx, trainy, emb, mask)
                 train_loss.append(curr_train_loss)
 
                 ## special handle in case of batch size = 1
@@ -366,13 +377,14 @@ def main_train():
             for _, data in enumerate(tqdm(validation_dataloader)):
                 y = data['batch_y']
                 x = data['batch_series']
+                mask = data['batch_mask'].to(device)
                 emb_tensor = data['batch_emb_tensor']
 
                 valx = torch.Tensor(x).to(device).float()
                 valy = torch.Tensor(y).to(device).float()
                 emb = torch.Tensor(emb_tensor).to(device).float()
 
-                curr_val_loss, val_pred_y = engine.eval(valx, valy, emb)
+                curr_val_loss, val_pred_y = engine.eval(valx, valy, emb,mask)
                 val_loss.append(curr_val_loss)
 
                 ## special handle in case of batch size = 1
@@ -519,17 +531,23 @@ def main_test(is_predict=False):
 
     for _, data in enumerate(tqdm(test_dataloader)):
         x = data['batch_series']
+        mask = data['batch_mask'].to(device)
+
         testx = torch.Tensor(x).to(device).float()
 
         with torch.no_grad():
             ## special handle in case of batch size = 1
             if testx.shape[0] == 1:
-                pred_y = torch.tensor([torch.stack([m(testx, None)[2] for m in models],0).mean(0)]).to(device)
+                pred_y = torch.tensor([torch.stack([m(testx, mask) for m in models],0).mean(0)]).to(device)
             else:
-                pred_y = torch.stack([m(testx, None)[2] for m in models],0).mean(0)
+                pred_y = torch.stack([m(testx, mask) for m in models],0).mean(0)
+            # if testx.shape[0] == 1:
+            #     pred_y = torch.tensor([torch.stack([m(testx, mask)[2] for m in models],0).mean(0)]).to(device)
+            # else:
+            #     pred_y = torch.stack([m(testx, mask)[2] for m in models],0).mean(0)
         test_outputs.append(pred_y)
 
-
+    print(pred_y.shape)
     test_pre = torch.cat(test_outputs, dim=0)
     pred = test_pre.squeeze().to(device)
     
