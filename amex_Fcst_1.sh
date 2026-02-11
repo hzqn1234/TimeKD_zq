@@ -8,7 +8,7 @@
 #SBATCH -c 16
 #SBATCH -w node03
 
-for lr in 1e-3 1e-4 1e-5 2e-3 2e-4 2e-5
+for lr in 1e-3 ## 1e-4 ## 1e-5 2e-3 2e-4 2e-5
 do
     echo "lr: "$lr
     for seed in 42
@@ -32,7 +32,7 @@ do
                                         --recon_w 0.5\
                                         --att_w 0.01\
                                         --emb_version "v2"\
-                                        --remark "only forecast loss, test Amodel_CAI"\
+                                        --remark "test Amodel_CAI flip dim, feature loss only"\
                                         --epochs 20 
     done
 done
