@@ -8,7 +8,7 @@
 #SBATCH -c 16
 #SBATCH -w node03
 
-for lr in 1e-3 ## 1e-4 ## 1e-5 2e-3 2e-4 2e-5
+for lr in 1e-3 1e-4 ## 1e-5 2e-3 2e-4 2e-5
 do
     echo "lr: "$lr
     for seed in 42
@@ -16,7 +16,7 @@ do
         echo "seed: "$seed
         CUDA_VISIBLE_DEVICES=0 python amex_train.py \
                                         --lrate $lr \
-                                        --sampling "1pct" \
+                                        --sampling "10pct" \
                                         --data_type "original" \
                                         --num_nodes 223 \
                                         --es_patience 3 \
