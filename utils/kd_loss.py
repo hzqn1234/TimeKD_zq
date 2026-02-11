@@ -45,15 +45,17 @@ class KDLoss(nn.Module):
             ts_out = torch.tensor([ts_out]).to(real.device)
             prompt_out = torch.tensor([prompt_out]).to(real.device)
 
-        feature_loss = self.feature_loss(ts_enc, prompt_enc)     
+        # feature_loss = self.feature_loss(ts_enc, prompt_enc)     
+        # print(ts_out.size(),real.size())
         fcst_loss = self.fcst_loss(ts_out, real)
-        recon_loss = self.recon_loss(prompt_out, real)
-        att_loss = self.att_loss(ts_att_last, prompt_att_last)
+        # recon_loss = self.recon_loss(prompt_out, real)
+        # att_loss = self.att_loss(ts_att_last, prompt_att_last)
 
         # print(f'shapes: feature_loss:{feature_loss.shape},fcst_loss:{fcst_loss.shape},recon_loss:{recon_loss.shape},att_loss:{att_loss.shape}')
         # print(f'feature_loss:{feature_loss},fcst_loss:{fcst_loss},recon_loss:{recon_loss},att_loss:{att_loss}')
-       
-        total_loss = self.fcst_w * fcst_loss + (self.feature_w * feature_loss + self.recon_w * recon_loss + self.att_w * att_loss) * 0
+
+        total_loss = self.fcst_w * fcst_loss
+        # total_loss = self.fcst_w * fcst_loss + (self.feature_w * feature_loss + self.recon_w * recon_loss + self.att_w * att_loss) * 0
         # total_loss = self.fcst_w * fcst_loss + self.feature_w * feature_loss + self.recon_w * recon_loss + self.att_w * att_loss
         # total_loss = self.fcst_w * fcst_loss + self.feature_w * feature_loss + self.recon_w * recon_loss
 

@@ -1,12 +1,12 @@
 #!/bin/sh
 
 #SBATCH -o gpu-job-train-3.output
-#SBATCH -p RTXA6Kq
+#SBATCH -p PA100q
 #SBATCH --gpus-per-node=1
 
 #SBATCH -n 1
 #SBATCH -c 16
-#SBATCH -w node15
+#SBATCH -w node03
 
 for lr in 1e-3 1e-4 1e-5 2e-3 2e-4 2e-5
 do
@@ -14,7 +14,7 @@ do
     for seed in 42
     do 
         echo "seed: "$seed
-        CUDA_VISIBLE_DEVICES=0 python amex_train.py \
+        CUDA_VISIBLE_DEVICES=2 python amex_train.py \
                                         --lrate $lr \
                                         --sampling "100pct" \
                                         --data_type "original" \
@@ -32,7 +32,7 @@ do
                                         --recon_w 0.5\
                                         --att_w 0.01\
                                         --emb_version "v2"\
-                                        --remark "only forecast loss"\
+                                        --remark "only forecast loss, test Amodel_CAI"\
                                         --epochs 20 
     done
 done
