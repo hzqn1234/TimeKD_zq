@@ -12,8 +12,8 @@ class Amodel(nn.Module):
         hidden_feature_dropout = 0.01
         self.use_series_oof = use_series_oof
         self.input_series_block_n1 = nn.Sequential(
-                                        # nn.Linear(series_dim, hidden_dim),
-                                        nn.Linear(13, hidden_dim),
+                                        nn.Linear(series_dim, hidden_dim),
+                                        # nn.Linear(13, hidden_dim),
                                         nn.LayerNorm(hidden_dim)
                                         )
         # self.input_series_block_n2 = nn.Sequential(
@@ -111,11 +111,11 @@ class Amodel(nn.Module):
         # print(x_series.shape)
         # torch.Size([128, 13, 223])
 
-        x1_tsf_enc = self.input_series_block_n1(x_series.permute(0, 2, 1))
+        x1_tsf_enc = self.input_series_block_n1(x_series)
         x1_tsf_enc = x1_tsf_enc.permute(1, 0, 2)
         x1_tsf     = self.transformer_encoder(x1_tsf_enc)
-        x1_tsf_pool = x1_tsf.mean(dim=0)
-        # x1_tsf_pool = self.transformer_pooling(x1_tsf_last, mask)
+        # x1_tsf_pool = x1_tsf.mean(dim=0)
+        x1_tsf_pool = self.transformer_pooling(x1_tsf, mask)
         
         # ## GRU
         # x1_gru = self.input_series_block_n2(x_series)

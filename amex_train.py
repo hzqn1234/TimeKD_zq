@@ -276,7 +276,12 @@ def seed_it(seed):
 
 args = parse_args()
 INPUT_PATH  = f'../../000_data/amex/{args.data_type}_{args.sampling}'
-emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_01/train/'
+if args.emb_version == "v1":
+    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb/train/'
+elif args.emb_version == "v2":
+    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_01/train/'
+elif args.emb_version == "v3":
+    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_03/train/'
 print(f'INPUT_PATH: {INPUT_PATH}')
 print(f'emb_path: {emb_path}')
 
