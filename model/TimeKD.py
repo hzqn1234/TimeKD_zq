@@ -4,6 +4,7 @@ from einops import rearrange
 from layers.StandardNorm import Normalize
 from layers.Transformer_EncDec import Encoder, EncoderLayer
 from layers.SelfAttention_Family import FullAttention, AttentionLayer
+from model.CAI_model import Amodel
 
 class Dual(nn.Module):
     def __init__(
@@ -29,6 +30,9 @@ class Dual(nn.Module):
         self.d_llm = d_llm
         self.e_layer = e_layer
         self.head = head
+
+        # series_dim, feature_dim, target_num, hidden_num, hidden_dim
+        self.ts_model = Amodel(self.num_nodes, 16, 1, 3, 128)
 
         # Norm
         self.normalize_layers = Normalize(self.num_nodes, affine=False).to(self.device)
@@ -87,40 +91,48 @@ class Dual(nn.Module):
     def param_num(self):
         return sum([param.nelement() for param in self.parameters()])
 
-    def forward(self, x, prompt_emb):
-        if prompt_emb is not None:
+    # def forward(self, x, prompt_emb):
+    def forward(self, data):
+        # y = data['batch_y']
+        # x = data['batch_series'].to(self.device)
+        # mask = data['batch_mask'].to(self.device)
+        # emb_tensor = data['batch_emb_tensor'].to(self.device)
+
+        if data['batch_emb_tensor'] is not None:
+            prompt_emb = data['batch_emb_tensor'].to(self.device)
+
             # # ADD THIS LINE FOR DEBUGGING
             # print("Shape of prompt_emb before squeeze:", prompt_emb.shape)
 
             # prompt_emb = prompt_emb.float().squeeze() # B, N, E
             prompt_emb = prompt_emb.float() # B, N, E
 
-            # # Reshape (B1, B2, N, E) to (B1 * B2, N, E)
-            # B = prompt_emb.shape[0]
-            # E = prompt_emb.shape[-1]  # Get the last dimension (embedding size, e.g., 768)
-            
-            # # Reshape to 3D. The -1 will automatically calculate the new sequence length (e.g., 28)
-            # prompt_emb = prompt_emb.view(B, -1, E)
-
             # # ADD THIS LINE FOR DEBUGGING
             # print("Shape of prompt_emb before TS input:", prompt_emb.shape)
 
             # TS Input
-            ts_data = x.float() # B L N
+            # ts_data = x.float() # B L N
+            # ts_out, ts_enc, ts_att_pool = self.ts_model(data)
+            ts_enc, _, ts_out, _, ts_att_pool, _ = self.ts_model(data)
             
-            # TS Norm
-            ts_norm = self.normalize_layers(ts_data, 'norm')
-            ts_norm = ts_norm.permute(0,2,1) # B N L
-            # _, _, N = ts_norm.shape
+            # # TS Norm
+            # ts_norm = self.normalize_layers(ts_data, 'norm')
+            # ts_norm = ts_norm.permute(0,2,1) # B N L
+            # # _, _, N = ts_norm.shape
 
-            # TS Emb
-            ts_emb = self.length_to_feature(ts_norm) # B N L -> B N C
-            # ts_emb = self.enc_embedding(ts_data, x_mark)
+            # # TS Emb
+            # ts_emb = self.length_to_feature(ts_norm) # B N L -> B N C
+            # # ts_emb = self.enc_embedding(ts_data, x_mark)
 
-            # TS Encoder
-            ts_enc, ts_att = self.ts_encoder(ts_emb) # B N C
-            ts_att_last = ts_att[-1]
-            ts_att_avg = ts_att_last.mean(dim=0)
+            # # TS Encoder
+            # ts_enc, ts_att = self.ts_encoder(ts_emb) # B N C
+            # ts_att_last = ts_att[-1]
+            # ts_att_avg = ts_att_last.mean(dim=0)
+
+            # #  TS Proj
+            # ts_out = self.ts_proj(ts_enc) # B N 1
+            # ts_out = ts_out.permute(0,2,1) # B 1 N
+            # ts_out = self.ts_proj2(ts_out).squeeze() # B 1 1
 
             # Prompt Encoder
             # print(prompt_emb.shape)
@@ -133,11 +145,6 @@ class Dual(nn.Module):
             prompt_att_last = prompt_att[-1]
             prompt_att_avg = prompt_att_last.mean(dim=0)
 
-            #  TS Proj
-            ts_out = self.ts_proj(ts_enc) # B N 1
-            ts_out = ts_out.permute(0,2,1) # B 1 N
-            ts_out = self.ts_proj2(ts_out).squeeze() # B 1 1
-
             #  Prompt Proj
             prompt_out = self.prompt_proj(prompt_enc) # B N 1
             prompt_out = prompt_out.permute(0,2,1) # B 1 N
@@ -145,25 +152,28 @@ class Dual(nn.Module):
         
         else:
             # TS Input
-            ts_data = x.float() # B L N
+            # ts_data = x.float() # B L N
+            # ts_out, ts_enc, ts_att_pool = self.ts_model(data)
+            ts_enc, _, ts_out, _, ts_att_pool, _ = self.ts_model(data)
+
             prompt_enc = None
             prompt_out = None
             ts_att_avg = None
             prompt_att_avg = None
             
-            # TS Norm
-            ts_norm = self.normalize_layers(ts_data, 'norm')
-            ts_norm = ts_norm.permute(0,2,1) # B N L
+            # # TS Norm
+            # ts_norm = self.normalize_layers(ts_data, 'norm')
+            # ts_norm = ts_norm.permute(0,2,1) # B N L
            
-            # TS Emb
-            ts_emb = self.length_to_feature(ts_norm) # B N C
+            # # TS Emb
+            # ts_emb = self.length_to_feature(ts_norm) # B N C
 
-            # TS Encoder
-            ts_enc,_ = self.ts_encoder(ts_emb) # B N C
+            # # TS Encoder
+            # ts_enc,_ = self.ts_encoder(ts_emb) # B N C
 
-            # Proj
-            ts_out = self.ts_proj(ts_enc) # B N 1
-            ts_out = ts_out.permute(0,2,1) # B 1 N
-            ts_out = self.ts_proj2(ts_out).squeeze() # B 1 1
+            # # Proj
+            # ts_out = self.ts_proj(ts_enc) # B N 1
+            # ts_out = ts_out.permute(0,2,1) # B 1 N
+            # ts_out = self.ts_proj2(ts_out).squeeze() # B 1 1
 
-        return ts_enc, prompt_enc, ts_out, prompt_out, ts_att_avg, prompt_att_avg
+        return ts_enc, prompt_enc, ts_out, prompt_out, ts_att_pool, prompt_att_avg
