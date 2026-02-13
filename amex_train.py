@@ -7,8 +7,8 @@ import os
 import random
 from torch.utils.data import DataLoader
 # from data_provider.data_loader_emb import Dataset_ETT_minute
-# from model.TimeKD import Dual
-from model.CAI_model import Amodel
+from model.TimeKD import Dual
+# from model.CAI_model import Amodel
 from utils.kd_loss import KDLoss
 from utils.metrics import MSE, MAE, metric
 import faulthandler
@@ -205,13 +205,13 @@ class trainer:
         self.device = device
         self.criterion = criterion.criterion
 
-        # self.model = Dual(
-        #     device=self.device, channel=channel, num_nodes=num_nodes, seq_len=seq_len, pred_len=pred_len, 
-        #     dropout_n=dropout_n, d_llm=d_llm, e_layer=e_layer, head=head
-        # )
+        self.model = Dual(
+            device=self.device, channel=channel, num_nodes=num_nodes, seq_len=seq_len, pred_len=pred_len, 
+            dropout_n=dropout_n, d_llm=d_llm, e_layer=e_layer, head=head
+        )
 
         # series_dim, feature_dim, target_num, hidden_num, hidden_dim, drop_rate=0.5, use_series_oof=False)
-        self.model = Amodel(223, 16, 1, 3, 128, device=self.device)
+        # self.model = Amodel(223, 16, 1, 3, 128, device=self.device)
         self.model.to(self.device)
 
         # print("The number of trainable parameters: {}".format(self.model.count_trainable_params()))
