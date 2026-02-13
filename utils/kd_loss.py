@@ -45,7 +45,7 @@ class KDLoss(nn.Module):
             ts_out = torch.tensor([ts_out]).to(real.device)
             prompt_out = torch.tensor([prompt_out]).to(real.device)
 
-        # feature_loss = self.feature_loss(ts_enc, prompt_enc)     
+        feature_loss = self.feature_loss(ts_enc, prompt_enc)     
         # print(ts_out.size(),real.size())
         fcst_loss = self.fcst_loss(ts_out, real)
         # recon_loss = self.recon_loss(prompt_out, real)

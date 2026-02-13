@@ -8,16 +8,16 @@
 #SBATCH -c 16
 #SBATCH -w node07
 
-for lr in 1e-3 1e-4 1e-5 ## 2e-3 2e-4 2e-5
-# for lr in 1e-3
+# for lr in 1e-3 1e-4 1e-5 ## 2e-3 2e-4 2e-5
+for lr in 1e-4
 do
     echo "lr: "$lr
     for seed in 42
     do 
         echo "seed: "$seed
-        CUDA_VISIBLE_DEVICES=0 python amex_train.py \
+        CUDA_VISIBLE_DEVICES=2 python amex_train.py \
                                         --lrate $lr \
-                                        --sampling "100pct" \
+                                        --sampling "1pct" \
                                         --data_type "original" \
                                         --num_nodes 223 \
                                         --es_patience 3 \
@@ -33,7 +33,7 @@ do
                                         --recon_w 0.5\
                                         --att_w 0.01\
                                         --emb_version "v3"\
-                                        --remark "test Amodel_CAI + TimeKD, feature loss only, emb_v3"\
+                                        --remark "test TimeKD, emb_v3"\
                                         --epochs 20 
     done
 done
