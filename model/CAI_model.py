@@ -112,10 +112,10 @@ class Amodel(nn.Module):
         # torch.Size([128, 13, 223])
 
         x1_tsf_enc = self.input_series_block_n1(x_series)
-        x1_tsf_enc = x1_tsf_enc.permute(1, 0, 2)
-        x1_tsf     = self.transformer_encoder(x1_tsf_enc)
+        x1_tsf_enc = x1_tsf_enc.permute(1, 0, 2) # [13,128,256]
+        x1_tsf     = self.transformer_encoder(x1_tsf_enc) # [13,128,256]
         # x1_tsf_pool = x1_tsf.mean(dim=0)
-        x1_tsf_pool = self.transformer_pooling(x1_tsf, mask)
+        x1_tsf_pool = self.transformer_pooling(x1_tsf, mask) # [128,256]
         
         # ## GRU
         # x1_gru = self.input_series_block_n2(x_series)
