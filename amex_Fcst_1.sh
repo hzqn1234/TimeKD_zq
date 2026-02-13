@@ -33,7 +33,7 @@ do
                                         --recon_w 0.5\
                                         --att_w 0.01\
                                         --emb_version "v3"\
-                                        --remark "test Amodel_CAI + TimeKD, feature loss only, emb_v3"\
+                                        --remark "test TimeKD, feature loss only, emb_v3"\
                                         --epochs 20 
     done
 done
