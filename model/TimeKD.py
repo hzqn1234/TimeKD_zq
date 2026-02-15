@@ -155,8 +155,8 @@ class Dual(nn.Module):
             # ts_out = self.ts_proj2(ts_out).squeeze() # B 1 1
 
             # TS Pool
-            ts_enc = ts_enc.permute(1,0,2) # L B C
-            ts_enc_pool = self.transformer_pooling(ts_enc, mask) # B C
+            ts_enc2 = ts_enc.permute(1,0,2) # L B C
+            ts_enc_pool = self.transformer_pooling(ts_enc2, mask) # B C
 
             # ts_enc = ts_enc.permute(0,2,1) # B C L
             # ts_enc_pool = self.ts_pool(ts_enc) # B C 1
@@ -178,8 +178,8 @@ class Dual(nn.Module):
             prompt_att_avg = prompt_att_last.mean(dim=0)
 
             #  Prompt Pool
-            prompt_enc = prompt_enc.permute(0,2,1) # B C L
-            prompt_enc_pool = self.prompt_pool(prompt_enc) # B L 1
+            prompt_enc2 = prompt_enc.permute(0,2,1) # B C L
+            prompt_enc_pool = self.prompt_pool(prompt_enc2) # B L 1
             prompt_enc_pool = prompt_enc_pool.squeeze(2) # B L
 
             #  Prompt Proj
@@ -213,8 +213,8 @@ class Dual(nn.Module):
             ts_att_avg = ts_att_last.mean(dim=0)
 
             # TS Pool
-            ts_enc = ts_enc.permute(1,0,2) # L B C
-            ts_enc_pool = self.transformer_pooling(ts_enc, mask) # B C
+            ts_enc2 = ts_enc.permute(1,0,2) # L B C
+            ts_enc_pool = self.transformer_pooling(ts_enc2, mask) # B C
 
             # ts_enc_pool = self.ts_pool(ts_enc) # B C 1
             # ts_enc_pool = ts_enc_pool.squeeze(2) # B C
