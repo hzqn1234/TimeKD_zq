@@ -604,7 +604,7 @@ def main_test(is_predict=False):
         log_type='predict'
     log_df['test_start_time'] = [test_start_time.strftime('%Y-%m-%d %H:%M:%S')]
     log_df['test_end_time'] = [test_end_time.strftime('%Y-%m-%d %H:%M:%S')]
-    log_df['test_duration'] = [test_duration]
+    # log_df['test_duration'] = [test_duration]
     log_df = save_log(log_type=log_type,log_df=log_df)
     return log_df
 
