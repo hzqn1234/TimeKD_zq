@@ -33,7 +33,7 @@ do
                                         --recon_w 0.5\
                                         --att_w 0.01\
                                         --emb_version "v3"\
-                                        --remark "test Amodel_CAI + TimeKD, emb_v3, feature loss + forecast loss"\
+                                        --remark "test TimeKD student + teacher, emb_v3, feature + forecast + recon loss"\
                                         --epochs 20 
     done
 done
