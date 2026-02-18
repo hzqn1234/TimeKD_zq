@@ -140,7 +140,7 @@ def save_train_embeddings(args, train_test = 'train'):
         feature_names=dynamic_feature_names,
     ).to(args.device)
 
-    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_03/{train_test}/'
+    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_04/{train_test}/'
     os.makedirs(emb_path, exist_ok=True)
 
     # embeddings_list = []

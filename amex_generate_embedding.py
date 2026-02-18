@@ -1,78 +1,154 @@
 import torch
 import torch.nn as nn
-from transformers import GPT2Tokenizer, GPT2Model
+from transformers import AutoTokenizer, AutoModel, PreTrainedModel
 from layers.Sub_CA import SCA
 from typing import Optional, Tuple, Union
-from dataclasses import dataclass
 import numpy as np
 import pandas as pd
-
-@dataclass
-class BaseModelOutputWithPastAndCrossAttentions:
-    last_hidden_state: torch.FloatTensor = None
-    past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
-    hidden_states: Optional[Tuple[torch.FloatTensor, ...]] = None
-    attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
-    cross_attentions: Optional[Tuple[torch.FloatTensor, ...]] = None
+import warnings
 
 # Get all available GPUs detected by the system
 gpus = list(range(torch.cuda.device_count()))
-print('available gpus:',gpus)
+print('Available GPUs:', gpus)
 
-class MSK(nn.Module):
-    def __init__(self, device="cuda", l_layer=6):
-        super(MSK, self).__init__()
+class UniversalMSK(nn.Module):
+    """
+    A universal wrapper for HuggingFace AutoModels that supports layer truncation
+    and gradient checkpointing across different architectures (GPT-2, Neo, Llama, Qwen, etc.).
+    """
+    def __init__(self, model_name="gpt2", device="cuda", l_layer=6):
+        super(UniversalMSK, self).__init__()
         self.device = device
-        # Use eager implementation for custom mask support
-        self.gpt2 = GPT2Model.from_pretrained("gpt2", attn_implementation="eager",
-                                              output_attentions=True, output_hidden_states=True)
         
-        self.gpt2.h = self.gpt2.h[:l_layer]
-        for param in self.gpt2.h.parameters():
+        print(f"Loading model: {model_name}...")
+        # Load base model with output_hidden_states=True to get embeddings
+        # trust_remote_code=True is needed for some newer models like Qwen
+        self.backbone = AutoModel.from_pretrained(
+            model_name, 
+            output_attentions=True, 
+            output_hidden_states=True,
+            trust_remote_code=True
+        )
+
+        # [CRITICAL] Universal Layer Truncation
+        # Different models store layers in different attributes:
+        # GPT2/Neo -> .h
+        # BERT/RoBERTa -> .encoder.layer
+        # Llama/Qwen/OPT -> .layers or .model.layers
+        self._truncate_layers(l_layer)
+
+        # Freeze parameters
+        for param in self.backbone.parameters():
             param.requires_grad = False
 
-        # Gradient checkpointing reduces VRAM usage to prevent OOM
-        self.gpt2.gradient_checkpointing_enable() 
+        # Enable Gradient Checkpointing if supported
+        if hasattr(self.backbone, 'gradient_checkpointing_enable'):
+            self.backbone.gradient_checkpointing_enable() 
 
-    def custom_forward(self, x_ids, calibrated_mask):
-        module = self.gpt2
-        input_shape = x_ids.size()
+    def _truncate_layers(self, keep_layers):
+        """
+        Recursively find the ModuleList containing layers and truncate it.
+        """
+        layer_attr_candidates = ['h', 'layers', 'blocks', 'layer']
         
-        position_ids = torch.arange(0, input_shape[1], dtype=torch.long, device=x_ids.device).unsqueeze(0)
+        target_module_list = None
+        parent_module = None
+        attr_name = None
 
-        inputs_embeds = module.wte(x_ids)
-        position_embeds = module.wpe(position_ids)
-        hidden_states = inputs_embeds + position_embeds
-
-        for block in module.h:
-            outputs = block(hidden_states, attention_mask=calibrated_mask, output_attentions=True)
-            hidden_states = outputs[0]
+        # 1. Search in direct children
+        for name in layer_attr_candidates:
+            if hasattr(self.backbone, name) and isinstance(getattr(self.backbone, name), nn.ModuleList):
+                target_module_list = getattr(self.backbone, name)
+                parent_module = self.backbone
+                attr_name = name
+                break
         
-        hidden_states = module.ln_f(hidden_states)
-        return BaseModelOutputWithPastAndCrossAttentions(last_hidden_state=hidden_states)
+        # 2. Search deeper (e.g., model.layers for Llama, transformer.h for Neo)
+        if target_module_list is None:
+            # Common sub-modules wrapping layers
+            sub_modules = ['transformer', 'model', 'encoder', 'decoder']
+            for sub in sub_modules:
+                if hasattr(self.backbone, sub):
+                    sub_mod = getattr(self.backbone, sub)
+                    for name in layer_attr_candidates:
+                        if hasattr(sub_mod, name) and isinstance(getattr(sub_mod, name), nn.ModuleList):
+                            target_module_list = getattr(sub_mod, name)
+                            parent_module = sub_mod
+                            attr_name = name
+                            break
+                if target_module_list: break
 
-    def forward(self, x_ids, calibrated_mask):
-        num_heads = self.gpt2.config.n_head
-        # Prepare mask for multi-head attention (Batch, 1, Seq, Seq)
-        calibrated_mask = calibrated_mask.unsqueeze(1).repeat(1, num_heads, 1, 1)
+        if target_module_list is not None:
+            print(f"Found layers at '{attr_name}'. Truncating from {len(target_module_list)} to {keep_layers} layers.")
+            truncated_list = target_module_list[:keep_layers]
+            # Replace the ModuleList with the truncated one
+            setattr(parent_module, attr_name, truncated_list)
+        else:
+            print(f"[WARNING] Could not find layer list to truncate for {type(self.backbone)}. Using full model.")
 
-        output = self.custom_forward(x_ids=x_ids, calibrated_mask=calibrated_mask).last_hidden_state
-        return output
+    def forward(self, input_ids, attention_mask):
+        # Universal forward pass
+        # We rely on HuggingFace's standard forward signature
+        outputs = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
+        
+        # Return last_hidden_state
+        return outputs.last_hidden_state
+
 
 class GenPromptEmb(nn.Module):
     def __init__(self, model_name="gpt2", num_nodes=223, seq_len=13, device='cuda', d_model=768, l_layer=6, feature_names=None, **kwargs):  
         super(GenPromptEmb, self).__init__()
         self.device, self.d_model, self.num_nodes, self.seq_len = device, d_model, num_nodes, seq_len
-        self.tokenizer = GPT2Tokenizer.from_pretrained(model_name)
-        self.tokenizer.pad_token = self.tokenizer.eos_token 
         
-        # Core MSK module
-        self.msk_module = MSK(device=self.device, l_layer=l_layer)
+        # [FIX] Load AutoTokenizer
+        try:
+            self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        except Exception as e:
+            print(f"Error loading tokenizer: {e}")
+            raise e
+            
+        # Ensure padding token exists
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+            print(f"Set pad_token to eos_token: {self.tokenizer.pad_token}")
         
-        # Wrap the WHOLE MSK in DataParallel to split (Batch * Seq_Len) across GPUs
-        self.gpt2 = nn.DataParallel(self.msk_module, device_ids=gpus).cuda()
+        # [FIX] Get accurate context limit
+        if hasattr(self.tokenizer, 'model_max_length'):
+            self.max_len = self.tokenizer.model_max_length
+            # Handle some tokenizers returning huge int values
+            if self.max_len > 100000: 
+                # Heuristic defaults
+                if "gpt-neo" in model_name: self.max_len = 2048
+                elif "qwen" in model_name.lower(): self.max_len = 8192 # Conservative
+                else: self.max_len = 1024
+        else:
+            self.max_len = 1024 # Fallback
+            
+        print(f"Model Max Context Window: {self.max_len}")
+
+        # Store feature names
+        self.feature_names = feature_names
+        if self.feature_names is not None:
+            self.feature_names = [str(fn) for fn in self.feature_names]
+            
+        self.has_warned_length = False
+
+        # Use the Universal MSK module
+        self.msk_module = UniversalMSK(model_name=model_name, device=self.device, l_layer=l_layer)
         
-        # NOTE: Since we are generating month-by-month, the 'channel' dim for SCA is now seq_len
+        # Wrap in DataParallel if multiple GPUs
+        if len(gpus) > 1:
+            self.gpt2 = nn.DataParallel(self.msk_module, device_ids=gpus).cuda()
+        else:
+            self.gpt2 = self.msk_module.to(device)
+        
+        # SCA Module
+        # Note: If switching models, d_model might change (e.g., Qwen-0.5B is 896, not 768)
+        # We need to ensure the SCA layer matches the model output dimension.
+        # Ideally, we should detect d_model from config, but arguments are passed in.
+        # User MUST ensure d_model arg matches the chosen model!
+        print(f"Initializing SCA with d_model={d_model}. Ensure this matches {model_name}'s hidden size!")
+        
         self.sub_ac = SCA(d_model=self.seq_len, n_heads=1, d_ff=4*d_model, norm='LayerNorm',
                           attn_dropout=0.1, dropout=0.1, pre_norm=True, activation="gelu",
                           res_attention=True, n_layers=1, store_attn=False).to(self.device)
@@ -80,95 +156,125 @@ class GenPromptEmb(nn.Module):
         for param in self.sub_ac.parameters():
             param.requires_grad = False
         
-        # --- PRE-TOKENIZATION CACHE ---
-        # Revised prompts for Month-by-Month generation
-        self.id_gt_intro = self.tokenizer.encode("For a credit default risk prediction dataset, " \
-                                                 "Y label is whether the customer will default; " \
-                                                 "X variables are features. At ", add_special_tokens=False)
+        # --- PROMPTS ---
+        intro_text = "Credit risk analysis. Predict default: "
+        self.id_gt_intro = self.tokenizer.encode(intro_text, add_special_tokens=False)
+        self.id_hd_intro = self.tokenizer.encode(intro_text, add_special_tokens=False)
         
-        self.id_hd_intro = self.tokenizer.encode("For a credit default risk prediction dataset, " \
-                                                 "X variables are features. At ", add_special_tokens=False)
+        self.id_mid = self.tokenizer.encode(" Feats: ", add_special_tokens=False)
+        self.id_suffix_gt = self.tokenizer.encode(". Label: ", add_special_tokens=False)
         
-        self.id_mid = self.tokenizer.encode(", features were ", add_special_tokens=False)
-        self.id_suffix_gt = self.tokenizer.encode(". The value for Y label is ", add_special_tokens=False)
-        self.id_suffix_hd = self.tokenizer.encode(". Forecast the value for Y label.", add_special_tokens=False)
+        suffix_hd_text = ". Risk prob:"
+        self.id_suffix_hd = self.tokenizer.encode(suffix_hd_text, add_special_tokens=False)
 
     def _generate_mask_batch(self, input_ids):
         batch_size, seq_len = input_ids.shape
-        masks = torch.zeros((batch_size, seq_len, seq_len), device=self.device)
+        masks = torch.ones((batch_size, seq_len), device=input_ids.device) # Default attention mask is 1s
+        # If there are padding tokens, set them to 0
+        if self.tokenizer.pad_token_id is not None:
+             masks[input_ids == self.tokenizer.pad_token_id] = 0
         return masks
 
     def generate_embeddings(self, x, y, time_ref):
-        # x shape: (Batch, Seq_Len, Num_Nodes)
         batch_size = x.shape[0]
-        # Ensure we use the actual seq_len from input if different from init
         current_seq_len = x.shape[1] 
         
         all_gt_ids = []
         all_hd_ids = []
         
-        # 1. Assembly of Token IDs
         with torch.no_grad():
             for i in range(batch_size):
                 y_label_ids = self.tokenizer.encode(str(int(y[i][0])), add_special_tokens=False)
-                
-                # Retrieve the actual length of the timeline for this customer
-                # time_ref[i] is typically a numpy array or list of dates
                 valid_len = len(time_ref[i])
 
-                # Iterate Month by Month (Time Steps)
                 for t in range(current_seq_len):
-                    # Check if we are in the padding region
                     if t < valid_len:
-                        date_obj = time_ref[i][t]
-                        date_str = str(date_obj)
+                        date_str = f"Dt:{str(time_ref[i][t])}"
                     else:
-                        # Use a placeholder for padding steps
                         date_str = "PAD"
-                        
                     date_ids = self.tokenizer.encode(date_str, add_special_tokens=False)
                     
-                    # All features for this month
-                    # x[i, t] is (Num_Nodes,)
                     feats_vals = x[i, t].cpu().numpy()
-                    vals_str = ", ".join(map(str, feats_vals))
-                    vals_ids = self.tokenizer.encode(vals_str, add_special_tokens=False)
+                    
+                    # --- DYNAMIC TRUNCATION LOGIC ---
+                    
+                    # Calculate strict budget
+                    reserved_tokens = len(self.id_gt_intro) + len(date_ids) + len(self.id_mid) + len(self.id_suffix_gt) + len(y_label_ids) + 10
+                    available_tokens_for_vals = self.max_len - reserved_tokens
+                    
+                    # 1. Check if we can use names
+                    use_names = False
+                    if self.feature_names is not None and len(self.feature_names) == len(feats_vals):
+                        # Quick heuristic: Name+Val is approx 5-8 tokens
+                        if (len(self.feature_names) * 8) < available_tokens_for_vals:
+                            use_names = True
+                    
+                    if use_names:
+                        vals_list = [f"{n}:{v:.2f}" for n, v in zip(self.feature_names, feats_vals)]
+                        vals_str = " ".join(vals_list)
+                        vals_ids = self.tokenizer.encode(vals_str, add_special_tokens=False)
+                        
+                        if len(vals_ids) > available_tokens_for_vals:
+                            use_names = False 
+                    
+                    if not use_names:
+                        # 2. Fallback to Values Only
+                        vals_list = [f"{v:.2f}" for v in feats_vals]
+                        vals_str = " ".join(vals_list)
+                        vals_ids = self.tokenizer.encode(vals_str, add_special_tokens=False)
 
-                    # GT Sequence: [Intro] [Date] [Mid] [Vals] [Suffix_GT] [Y]
+                    # 3. HARD TRUNCATION
+                    if len(vals_ids) > available_tokens_for_vals:
+                        if not self.has_warned_length:
+                            print(f"[WARNING] Input truncated! {len(vals_ids)} tokens > limit {available_tokens_for_vals}. Features lost.")
+                            self.has_warned_length = True
+                        vals_ids = vals_ids[:available_tokens_for_vals]
+
+                    # Assembly
                     gt_seq = (self.id_gt_intro + date_ids + self.id_mid + 
                               vals_ids + self.id_suffix_gt + y_label_ids)
                     
-                    # HD Sequence: [Intro] [Date] [Mid] [Vals] [Suffix_HD]
                     hd_seq = (self.id_hd_intro + date_ids + self.id_mid + 
                               vals_ids + self.id_suffix_hd)
 
                     all_gt_ids.append(torch.tensor(gt_seq))
                     all_hd_ids.append(torch.tensor(hd_seq))
 
-            # 2. Padding and Tensor conversion
+            # Padding
             gt_tok_ids = torch.nn.utils.rnn.pad_sequence(all_gt_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id).to(self.device)
             hd_tok_ids = torch.nn.utils.rnn.pad_sequence(all_hd_ids, batch_first=True, padding_value=self.tokenizer.pad_token_id).to(self.device)
 
-            # 3. Mask Generation
+            # Generate standard 2D Attention Mask (Batch*SeqLen, Tokens)
+            # Note: Previously we generated 4D mask for manual forward. Now we use standard 2D.
             gt_masks = self._generate_mask_batch(gt_tok_ids)
             hd_masks = self._generate_mask_batch(hd_tok_ids)
 
-            # 4. Forward Pass with Mixed Precision
-            with torch.amp.autocast(device_type='cuda', dtype=torch.float16):
+            # [COMPATIBILITY FIX] Handle Autocast
+            if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast'):
+                ctx = torch.amp.autocast(device_type='cuda', dtype=torch.float16)
+            else:
+                ctx = torch.cuda.amp.autocast()
+
+            with ctx:
                 gt_out = self.gpt2(gt_tok_ids, gt_masks)
                 hd_out = self.gpt2(hd_tok_ids, hd_masks)
 
-            # 5. Extract Embeddings & Cross-Attention
-            # View as (Batch, Seq_Len, Token_Seq, D_Model) -> Extract last token -> (Batch, Seq_Len, D_Model)
-            gt_emb = gt_out.view(batch_size, current_seq_len, -1, self.d_model)[:, :, -1, :]
-            hd_emb = hd_out.view(batch_size, current_seq_len, -1, self.d_model)[:, :, -1, :]
+            # Extract Embeddings (Last Token)
+            # Check if output is tuple or tensor (AutoModel vs GPT2Model differences)
+            if isinstance(gt_out, torch.Tensor):
+                # Should not happen if wrapper returns last_hidden_state, but safe check
+                gt_hidden = gt_out
+                hd_hidden = hd_out
+            else:
+                gt_hidden = gt_out
+                hd_hidden = hd_out
 
-            # Permute to (Batch, D_Model, Seq_Len) for SCA
-            # SCA treats the last dim (Seq_Len) as the 'channel'/'feature' dim for attention
+            gt_emb = gt_hidden.view(batch_size, current_seq_len, -1, self.d_model)[:, :, -1, :]
+            hd_emb = hd_hidden.view(batch_size, current_seq_len, -1, self.d_model)[:, :, -1, :]
+
             gt_emb = gt_emb.permute(0, 2, 1)
             hd_emb = hd_emb.permute(0, 2, 1)
 
             sub_out = self.sub_ac(gt_emb, hd_emb, hd_emb)
             
-            # Return (Batch, Seq_Len, D_Model)
             return sub_out.permute(0, 2, 1)
