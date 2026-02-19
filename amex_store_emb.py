@@ -140,7 +140,6 @@ class Amex_Dataset:
         }
 
     def collate_fn(self, batch):
-        # [修改] 这里不再需要 batch_idx 用于文件名，但为了逻辑完整保留
         batch_idx = np.array([sample['idx'] for sample in batch])
         
         batch_max_len = 0
@@ -229,13 +228,17 @@ def save_train_embeddings(args, train_test='train'):
         feature_names=dynamic_feature_names,
     ).to(args.device)
     
-    try:
-        gen_prompt_emb.forward_tokenized = torch.compile(   gen_prompt_emb.forward_tokenized, 
-                                                            mode="reduce-overhead",
-                                                            dynamic=True
-                                                            )
-    except:
-        pass
+    # [FIX 1] COMPLETELY DISABLED TORCH.COMPILE
+    # torch.compile completely conflicts with nn.DataParallel multi-threading.
+    # We remove it to maintain constant execution speed.
+    # try:
+    #     gen_prompt_emb.forward_tokenized = torch.compile(   
+    #         gen_prompt_emb.forward_tokenized, 
+    #         mode="reduce-overhead",
+    #         dynamic=True
+    #     )
+    # except:
+    #     pass
     
     effective_max_len = min(args.max_token_len, gen_prompt_emb.max_len)
     
@@ -268,12 +271,15 @@ def save_train_embeddings(args, train_test='train'):
     # [核心优化] 预分配大数组
     # 我们不再循环 create_dataset，而是一次性创建一个巨大的 Dataset，然后填空
     with h5py.File(output_h5_path, 'w') as hf:
-        # 创建 Embedding 存储区: (N, 13, D)
-        # chunks=True 启用自动分块，这对大数组性能至关重要
+        
+        # [FIX 2] EXPLICIT HDF5 CHUNKING
+        # Set chunking perfectly to match batch size and dimensions to avoid I/O thrashing
+        chunk_shape = (args.batch_size, args.input_len, args.d_model)
+        
         emb_dset = hf.create_dataset('embeddings', 
                                      shape=(total_samples, args.input_len, args.d_model),
                                      dtype='float32',
-                                     chunks=True)
+                                     chunks=chunk_shape)
         
         # 创建 ID 存储区 (作为索引对照)
         # 使用变长字符串类型
