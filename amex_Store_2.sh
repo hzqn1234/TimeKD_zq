@@ -6,17 +6,18 @@
 # SBATCH --gres=gpu:1 
 
 # SBATCH -n 1
-# SBATCH -c 16
-# SBATCH -w node04
+#SBATCH -c 8
+#SBATCH -w node04
 
-CUDA_VISIBLE_DEVICES=6 \
+CUDA_VISIBLE_DEVICES=4 \
 python amex_store_emb.py \
         --num_nodes 223 \
         --data_type "original" \
-        --batch_size 2 \
-        --num_workers 16 \
+        --batch_size 4 \
+        --num_workers 8 \
         --model_name "Qwen/Qwen2.5-0.5B" \
         --d_model 896 \
+        --max_token_len 4096 \
         --sampling "10pct"
 
 
