@@ -6,6 +6,8 @@ import time
 import os
 import random
 from torch.utils.data import DataLoader
+# from data_provider.data_loader_emb import Dataset_ETT_minute
+# from model.TimeKD import Dual
 from model.CAI_model import Amodel
 from utils.kd_loss import KDLoss
 from utils.metrics import MSE, MAE, metric
@@ -14,8 +16,9 @@ from tqdm import tqdm
 import pandas as pd
 from utils.tools import StandardScaler
 import h5py
-from sklearn.model_selection import KFold, StratifiedKFold, GroupKFold
+from sklearn.model_selection import KFold, StratifiedKFold,GroupKFold
 from datetime import datetime
+
 
 faulthandler.enable()
 torch.cuda.empty_cache()
@@ -54,6 +57,7 @@ def parse_args():
     parser.add_argument("--emb_version", type=str, default="v1")
     parser.add_argument("--remark", type=str, default="")
     
+    
     parser.add_argument(
         "--es_patience",
         type=int,
@@ -64,68 +68,53 @@ def parse_args():
         "--save",
         type=str,
         default="./logs/",
+        # default="./logs/" + str(time.strftime("%Y-%m-%d-%H:%M:%S")) + "-",
         help="save path",
     )
     return parser.parse_args()
 
 class Amex_Dataset:
-    def __init__(self, df_series, uidxs, df_y=None, label_name='target', id_name='customer_ID'):
+    # def __init__(self,df_series,df_feature,uidxs,df_y=None):
+    def __init__(self,df_series,uidxs,df_y=None,label_name = 'target',id_name = 'customer_ID'):
         self.df_series = df_series
+        # self.df_feature = df_feature
         self.df_y = df_y
         self.uidxs = uidxs
         self.label_name = label_name
         self.id_name = id_name
         self.is_train = df_y is not None
-        
-        # [V6 优化] 建立 CustomerID -> Row Index 的快速查找表
-        if self.is_train:
-            self.emb_file_path = os.path.join(emb_path, "train_embeddings_all.h5")
-            print(f"Loading embedding index from: {self.emb_file_path}")
-            
-            # 我们需要知道每个 customer_id 在 HDF5 里的行号
-            # 一次性读取所有 ID 到内存（字符串列表占用内存很小，几百MB）
-            with h5py.File(self.emb_file_path, 'r') as hf:
-                # 获取所有 ID，注意 decode
-                all_ids = hf['customer_ids'][:]
-                
-            # 构建哈希表：Key=CustomerID, Value=Row_Index
-            # all_ids 可能是 bytes 类型，需要 decode
-            self.id_to_row = {}
-            for i, cid in enumerate(all_ids):
-                # 处理 bytes 和 str 的兼容性
-                if isinstance(cid, bytes):
-                    cid = cid.decode('utf-8')
-                self.id_to_row[str(cid)] = i
-            
-            print(f"Index built. Total mapped IDs: {len(self.id_to_row)}")
 
     def __len__(self):
         return (len(self.uidxs))
 
     def __getitem__(self, index):
-        i1, i2, idx = self.uidxs[index]
-        series = self.df_series.iloc[i1:i2+1, 1:].drop(['S_2'], axis=1).values
-        time_ref = self.df_series.iloc[i1:i2+1, 1:]['S_2']
+        i1,i2,idx = self.uidxs[index]
+        series = self.df_series.iloc[i1:i2+1,1:].drop(['S_2'],axis=1).values
+        time_ref = self.df_series.iloc[i1:i2+1,1:]['S_2']
+        # series = self.df_series.iloc[i1:i2+1,1:].drop(['year_month','S_2'],axis=1).values
 
         if len(series.shape) == 1:
-            series = series.reshape((-1,) + series.shape[-1:])
+            series = series.reshape((-1,)+series.shape[-1:])
+        # series_ = series.copy()
+        # series_[series_!=0] = 1.0 - series_[series_!=0] + 0.001
+        # feature = self.df_feature.loc[idx].values[1:]
+        # feature_ = feature.copy()
+        # feature_[feature_!=0] = 1.0 - feature_[feature_!=0] + 0.001
         
         if self.is_train:
-            # [V6 优化] 查表 + 随机读取
-            # 1. 查找 idx 对应的行号
-            row_idx = self.id_to_row.get(str(idx))
-            
-            if row_idx is None:
-                raise ValueError(f"Customer ID {idx} not found in embedding file!")
+            # emb_path = f"amex_emb/{args.data_type}/{args.sampling}/train/"
+            file_path = os.path.join(emb_path, f"{idx}.h5")
+            # print(f'file_path: {file_path}')
 
-            # 2. 从大数组中读取该行
-            with h5py.File(self.emb_file_path, 'r') as hf:
-                emb_data = hf['embeddings'][row_idx]
+            with h5py.File(file_path, 'r') as hf:
+                emb_data = hf['stacked_embeddings'][:]
                 emb_tensor = torch.from_numpy(emb_data)
 
-            label = self.df_y.loc[idx, [self.label_name]].values
+
+            label = self.df_y.loc[idx,[self.label_name]].values
             return {
-                    'SERIES': series,
+                    'SERIES': series,#np.concatenate([series,series_],axis=1),
+                    # 'FEATURE': np.concatenate([feature,feature_]),
                     'LABEL': label,
                     'time_ref': time_ref,
                     'idx': idx,
@@ -133,23 +122,33 @@ class Amex_Dataset:
                     }
         else:
             return {
-                    'SERIES': series,
+                    'SERIES': series,#np.concatenate([series,series_],axis=1),
+                    # 'FEATURE': np.concatenate([feature,feature_]),
                     'time_ref': time_ref,
                     'idx': idx,
                     }
 
     def collate_fn(self, batch):
+        """
+        Padding to same size.
+        """
+
         batch_size = len(batch)
         batch_series = torch.zeros((batch_size, 13, batch[0]['SERIES'].shape[1]))
         batch_mask = torch.zeros((batch_size, 13))
+        # batch_feature = torch.zeros((batch_size, batch[0]['FEATURE'].shape[0]))
         batch_y = torch.zeros(batch_size)
+        # batch_time_ref = np.array([sample['time_ref'] for sample in batch])
+        # batch_time_ref = [sample['time_ref'] for sample in batch]
         batch_idx = np.array([sample['idx'] for sample in batch])
         batch_emb_tensor = None
 
         for i, item in enumerate(batch):
             v = item['SERIES']
             batch_series[i, :v.shape[0], :] = torch.tensor(v).float()
-            batch_mask[i, :v.shape[0]] = 1.0
+            batch_mask[i,:v.shape[0]] = 1.0
+            # v = item['FEATURE'].astype(np.float32)
+            # batch_feature[i] = torch.tensor(v).float()
 
             if self.is_train:
                 v = item['LABEL'].astype(np.float32)
@@ -157,24 +156,28 @@ class Amex_Dataset:
         
         if self.is_train:
             batch_emb_tensor = torch.stack([sample['emb_tensor'] for sample in batch], dim=0) 
+                
 
-        return {'batch_series': batch_series,
-                'batch_mask': batch_mask,
-                'batch_y': batch_y,
-                'batch_idx': batch_idx,
-                'batch_emb_tensor': batch_emb_tensor
+        return {'batch_series':batch_series
+                ,'batch_mask':batch_mask
+                # ,'batch_feature':batch_feature
+                ,'batch_y':batch_y
+                # ,'batch_time_ref':batch_time_ref
+                ,'batch_idx':batch_idx
+                ,'batch_emb_tensor':batch_emb_tensor
                 }
 
 class Criterion:
     def __init__(self):
         self.feature_loss = 'smooth_l1'  
+        # self.fcst_loss = 'smooth_l1'
         self.fcst_loss = 'bce'
         self.recon_loss = 'smooth_l1'
         self.att_loss = 'smooth_l1'   
-        self.fcst_w    = args.fcst_w
-        self.recon_w   = args.recon_w
-        self.feature_w = args.feature_w
-        self.att_w     = args.att_w
+        self.fcst_w    = args.fcst_w    ## 1
+        self.recon_w   = args.recon_w   ## 0.5
+        self.feature_w = args.feature_w ## 0.1     
+        self.att_w     = args.att_w     ## 0.01
         self.criterion = KDLoss(self.feature_loss, self.fcst_loss, self.recon_loss, self.att_loss,  self.feature_w,  self.fcst_w,  self.recon_w,  self.att_w)
 
 class trainer:
@@ -194,6 +197,7 @@ class trainer:
         device,
         epochs
     ):
+
         self.MSE = MSE
         self.MAE = MAE
         self.clip = 5
@@ -201,41 +205,61 @@ class trainer:
         self.device = device
         self.criterion = criterion.criterion
 
+        # self.model = Dual(
+        #     device=self.device, channel=channel, num_nodes=num_nodes, seq_len=seq_len, pred_len=pred_len, 
+        #     dropout_n=dropout_n, d_llm=d_llm, e_layer=e_layer, head=head
+        # )
+
+        # series_dim, feature_dim, target_num, hidden_num, hidden_dim, drop_rate=0.5, use_series_oof=False)
         self.model = Amodel(223, 16, 1, 3, 128, d_llm=d_llm, device=self.device)
         self.model.to(self.device)
 
+        # print("The number of trainable parameters: {}".format(self.model.count_trainable_params()))
         print("The number of parameters: {}".format(self.model.param_num()))
+        # print(self.model)
 
         self.optimizer = optim.AdamW(self.model.parameters(), lr=lrate, weight_decay=wdecay)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=min(epochs, 100), eta_min=1e-8, verbose=True)
 
+
+    # def train(self, x, y, emb, m=None):
     def train(self, data):
         self.model.train()
         self.optimizer.zero_grad()
         ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(data)
+        # ts_out = self.model(x,m)
+        # ts_out = self.model(data)
         y = data['batch_y'].to(device)
         
+        ## special handle in case of batch size = 1
+        # if x.shape[0] == 1:
         if data['batch_series'].shape[0] == 1:
             y =  torch.tensor([y])
         
         loss = self.criterion(ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att, y)
+        # loss = self.criterion(None, None, ts_out, None, None, None, y)
         loss.backward()
         if self.clip is not None:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip) 
         self.optimizer.step() 
         return loss.item(), ts_out
 
+    # def eval(self, x, y, emb, m):
     def eval(self, data):
         self.model.eval()
 
         with torch.no_grad():
             ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(data)
+            # ts_out = self.model(data)
             y = data['batch_y'].to(device)
 
+            ## special handle in case of batch size = 1
+            # if x.shape[0] == 1:
             if data['batch_series'].shape[0] == 1:
                 y =  torch.tensor([y])
 
             loss = self.criterion(ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att, y)
+            # loss = self.criterion(None, None, ts_out, None, None, None, y)
         return loss.item(), ts_out
 
 
@@ -252,10 +276,12 @@ def seed_it(seed):
 
 args = parse_args()
 INPUT_PATH  = f'../../000_data/amex/{args.data_type}_{args.sampling}'
-
-# [V6] 统一使用 emb_04 目录
-emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_04/'
-
+if args.emb_version == "v1":
+    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb/train/'
+elif args.emb_version == "v2":
+    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_01/train/'
+elif args.emb_version == "v3":
+    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_03/train/'
 print(f'INPUT_PATH: {INPUT_PATH}')
 print(f'emb_path: {emb_path}')
 
@@ -274,7 +300,11 @@ print(f'model_specs: {model_specs}')
 print(f'model_path: {model_path}')
 if not os.path.exists(model_path):
     os.makedirs(model_path)
+    
 
+# val_time = []
+# train_time = []
+# test_time = []
 print(args)
 
 criterion = Criterion()
@@ -289,7 +319,7 @@ def main_train():
     trainval_y = pd.read_csv(f'{input_path}/train_labels.csv')
 
     skf = StratifiedKFold(n_splits=args.kfold, shuffle=True, random_state=args.seed)
-    for fold_index, (trn_index, val_index) in enumerate(skf.split(trainval_y, trainval_y['target'])):
+    for fold_index, (trn_index, val_index) in enumerate(skf.split(trainval_y,trainval_y['target'])):
         fold_train_start_time =  datetime.now()
         print(f"Start training... Fold {fold_index} at {fold_train_start_time}")
 
@@ -309,14 +339,14 @@ def main_train():
             epochs=args.epochs
         )
 
-        train_dataset = Amex_Dataset(trainval_series, [trainval_series_idx[i] for i in trn_index], trainval_y)
-        train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=False, collate_fn=train_dataset.collate_fn, num_workers=args.num_workers)
-        validation_dataset = Amex_Dataset(trainval_series, [trainval_series_idx[i] for i in val_index], trainval_y)
-        validation_dataloader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, collate_fn=train_dataset.collate_fn, num_workers=args.num_workers)       
+        train_dataset = Amex_Dataset(trainval_series,[trainval_series_idx[i] for i in trn_index],trainval_y)
+        train_dataloader = DataLoader(train_dataset,batch_size=args.batch_size,shuffle=True, drop_last=False, collate_fn=train_dataset.collate_fn,num_workers=args.num_workers)
+        validation_dataset = Amex_Dataset(trainval_series,[trainval_series_idx[i] for i in val_index],trainval_y)
+        validation_dataloader = DataLoader(validation_dataset,batch_size=args.batch_size,shuffle=False, drop_last=False, collate_fn=train_dataset.collate_fn,num_workers=args.num_workers)       
 
         loss = 9999999
         epochs_since_best_mse = 0
-        best_score = None
+        best_score=None
         his_loss = []
         early_stopped = False
 
@@ -328,18 +358,33 @@ def main_train():
             train_ys = []
             
             for _, data in enumerate(tqdm(train_dataloader)):
+                # y = data['batch_y']
+                # x = data['batch_series']
+                # mask = data['batch_mask'].to(device)
+                # emb_tensor = data['batch_emb_tensor']
+
+                # trainx = torch.Tensor(x).to(device).float()
+                # trainy = torch.Tensor(y).to(device).float()
+                # emb = torch.Tensor(emb_tensor).to(device).float()
+
+                # curr_train_loss, train_pred_y = engine.train(trainx, trainy, emb, mask)
                 curr_train_loss, train_pred_y = engine.train(data)
                 train_loss.append(curr_train_loss)
 
+                ## special handle in case of batch size = 1
+                # if trainx.shape[0] == 1:
                 if data['batch_series'].shape[0] == 1:
                     train_pred_y =  torch.tensor([train_pred_y]).to(device)
 
                 train_outputs.append(train_pred_y)
+                # train_ys.append(trainy)
                 train_ys.append(data['batch_y'])
+
 
             t2 = time.time()
             log = "Epoch: {:03d}, Training Time: {:.4f} secs"
             print(log.format(i, (t2 - t1)))
+            # train_time.append(t2 - t1)
 
             # Validation
             val_loss = []
@@ -348,20 +393,33 @@ def main_train():
             s1 = time.time()
 
             for _, data in enumerate(tqdm(validation_dataloader)):
+                # y = data['batch_y']
+                # x = data['batch_series']
+                # mask = data['batch_mask'].to(device)
+                # emb_tensor = data['batch_emb_tensor']
+
+                # valx = torch.Tensor(x).to(device).float()
+                # valy = torch.Tensor(y).to(device).float()
+                # emb = torch.Tensor(emb_tensor).to(device).float()
+
+                # curr_val_loss, val_pred_y = engine.eval(valx, valy, emb,mask)
                 curr_val_loss, val_pred_y = engine.eval(data)
                 val_loss.append(curr_val_loss)
 
+                ## special handle in case of batch size = 1
+                # if valx.shape[0] == 1:
                 if data['batch_series'].shape[0] == 1:
                     val_pred_y =  torch.tensor([val_pred_y]).to(device)
 
                 val_outputs.append(val_pred_y)
+                # val_ys.append(valy)
                 val_ys.append(data['batch_y'])
 
             s2 = time.time()
             log = "Epoch: {:03d}, Validation Time: {:.4f} secs"
             print(log.format(i, (s2 - s1)))
         
-            # calculate train metrics
+            ## calculate train metrics
             train_pre = torch.cat(train_outputs, dim=0)
             train_y = torch.cat(train_ys, dim=0)
             train_real = torch.Tensor(train_y).to(device).float()
@@ -371,7 +429,7 @@ def main_train():
             train_score = metric(pred.detach(), real.detach())
             print(f'train_score: {train_score}')
 
-            # calculate val metrics
+            ## calculate val metrics
             val_pre = torch.cat(val_outputs, dim=0)
             val_y = torch.cat(val_ys, dim=0)
             val_real = torch.Tensor(val_y).to(device).float()
@@ -381,7 +439,7 @@ def main_train():
             val_score = metric(pred.detach(), real.detach())
             print(f'val_score: {val_score}')
 
-            # Log loss
+            ## Log loss
             mtrain_loss = np.mean(train_loss)
             mvalid_loss = np.mean(val_loss)
 
@@ -389,12 +447,19 @@ def main_train():
             print("-----------------------")
 
             log = "Epoch: {:03d}, Train Loss: {:.4f}"
-            print(log.format(i, mtrain_loss), flush=True)
+            print(
+                log.format(i, mtrain_loss),
+                flush=True,
+            )
             log = "Epoch: {:03d}, Valid Loss: {:.4f}"
-            print(log.format(i, mvalid_loss), flush=True)
+            print(
+                log.format(i, mvalid_loss),
+                flush=True,
+            )
 
             if mvalid_loss < loss:
                 print("###Update tasks appear###")
+
                 loss = mvalid_loss
                 torch.save(engine.model.state_dict(), model_path + f"best_model_fold_{fold_index}.pth")
                 bestid = i
@@ -408,6 +473,7 @@ def main_train():
 
             engine.scheduler.step()
 
+            # if epochs_since_best_mse >= args.es_patience and i >= min(args.epochs//2, 10): # early stop
             if epochs_since_best_mse >= args.es_patience: # early stop
                 early_stopped = True
                 print("Early Stop \n")
@@ -420,7 +486,7 @@ def main_train():
         print(f"The epoch of the best result：{bestid}")
         print(f"The valid loss of the best model {str(round(his_loss[bestid - 1], 4))} \n", )
     
-        # output train result to log file
+        ## output train result to log file
         log_df = create_log_df()
         log_df['fold_index'] = [fold_index]
         log_df['amex_metric'] = [f"{best_score[0]:.6g}"]
@@ -429,7 +495,7 @@ def main_train():
         log_df['fold_train_start_time'] = [fold_train_start_time.strftime('%Y-%m-%d %H:%M:%S')]
         log_df['fold_train_end_time'] = [fold_train_end_time.strftime('%Y-%m-%d %H:%M:%S')]
         log_df['fold_train_duration'] = [fold_train_duration]
-        log_df = save_log(log_type='train', log_df=log_df)
+        log_df = save_log(log_type='train',log_df=log_df)
     
     train_end_time = datetime.now()
     train_duration = train_end_time - train_start_time
@@ -453,8 +519,9 @@ def main_test(is_predict=False):
     test_series     = pd.read_feather(f'{input_path}/df_nn_series_test.feather')
     test_series_idx = pd.read_feather(f'{input_path}/df_nn_series_idx_test.feather').values
 
-    test_dataset = Amex_Dataset(test_series, test_series_idx)
-    test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size * 8, shuffle=False, drop_last=False, collate_fn=test_dataset.collate_fn, num_workers=args.num_workers)
+
+    test_dataset = Amex_Dataset(test_series,test_series_idx)
+    test_dataloader = DataLoader(test_dataset,batch_size=args.batch_size * 8,shuffle=False, drop_last=False, collate_fn=test_dataset.collate_fn,num_workers=args.num_workers)
 
     models = []
     test_outputs = []
@@ -484,11 +551,24 @@ def main_test(is_predict=False):
               
 
     for _, data in enumerate(tqdm(test_dataloader)):
+        # x = data['batch_series']
+        # mask = data['batch_mask'].to(device)
+
+        # testx = torch.Tensor(x).to(device).float()
+
         with torch.no_grad():
+            ## special handle in case of batch size = 1
+            # if testx.shape[0] == 1:
             if data['batch_series'].shape[0] == 1:
-                pred_y = torch.tensor([torch.stack([m(data)[2] for m in models], 0).mean(0)]).to(device)
+                # pred_y = torch.tensor([torch.stack([m(testx, mask) for m in models],0).mean(0)]).to(device)
+                pred_y = torch.tensor([torch.stack([m(data)[2] for m in models],0).mean(0)]).to(device)
             else:
-                pred_y = torch.stack([m(data)[2] for m in models], 0).mean(0)
+                # pred_y = torch.stack([m(testx, mask) for m in models],0).mean(0)
+                pred_y = torch.stack([m(data)[2] for m in models],0).mean(0)
+            # if testx.shape[0] == 1:
+            #     pred_y = torch.tensor([torch.stack([m(testx, mask)[2] for m in models],0).mean(0)]).to(device)
+            # else:
+            #     pred_y = torch.stack([m(testx, mask)[2] for m in models],0).mean(0)
         test_outputs.append(pred_y)
 
     print(pred_y.shape)
@@ -504,14 +584,14 @@ def main_test(is_predict=False):
     else:
         sub = test_series[['customer_ID']].iloc[test_series_idx[:, 0]].copy()
         sub['prediction'] = pred.cpu().detach().numpy()
-        sub.to_csv(model_path+'submission.csv.zip', index=False, compression='zip')
+        sub.to_csv(model_path+'submission.csv.zip',index=False, compression='zip')
   
     test_end_time = datetime.now()
     test_duration = test_end_time - test_start_time
     print(f"Testing ends at {test_end_time}")
     print(f"Total test time spent: {test_duration}") 
 
-    # output test result to log file
+    ## output test result to log file
     log_df = create_log_df()
     log_df['is_predict'] = [is_predict]
     if not is_predict:
@@ -524,7 +604,8 @@ def main_test(is_predict=False):
         log_type='predict'
     log_df['test_start_time'] = [test_start_time.strftime('%Y-%m-%d %H:%M:%S')]
     log_df['test_end_time'] = [test_end_time.strftime('%Y-%m-%d %H:%M:%S')]
-    log_df = save_log(log_type=log_type, log_df=log_df)
+    # log_df['test_duration'] = [test_duration]
+    log_df = save_log(log_type=log_type,log_df=log_df)
     return log_df
 
 def create_log_df():
@@ -545,11 +626,11 @@ def create_log_df():
     log_df['remark'] = [args.remark]
     return log_df
 
-def save_log(log_type='train', log_df=None):
+def save_log(log_type='train',log_df=None):
     if not os.path.exists(f'./experiment_log_{log_type}.csv'):
-        log_df.to_csv(f'./experiment_log_{log_type}.csv', index=False)
+        log_df.to_csv(f'./experiment_log_{log_type}.csv',index=False)
     else:
-        log_df.to_csv(f'./experiment_log_{log_type}.csv', index=False, header=None, mode='a') 
+        log_df.to_csv(f'./experiment_log_{log_type}.csv',index=False,header=None,mode='a') 
     return log_df
 
 if __name__ == "__main__":
@@ -576,3 +657,4 @@ if __name__ == "__main__":
         os.system(f"""kaggle competitions submit -c amex-default-prediction -f {model_path}/submission.csv.zip -m '{submit_message}'""")
         print("\n")
         pass
+

@@ -1,8 +1,5 @@
-import os
-# [关键] 防止 Tokenizer 并行导致的 CPU 死锁
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
 import torch
+import os
 import time
 import h5py
 import argparse
@@ -28,10 +25,7 @@ class Amex_Dataset:
         self.feature_names = feature_names
         self.max_len = max_len
         
-        print(f"Dataset initialized with Hard Max Length: {self.max_len}")
-        print("Pre-computing static token IDs...")
-        
-        # --- 缓存优化 ---
+        # Pre-compute static prompt parts IDs
         intro_text = "Credit risk analysis. Predict default: "
         self.id_gt_intro = self.tokenizer.encode(intro_text, add_special_tokens=False)
         self.id_hd_intro = self.tokenizer.encode(intro_text, add_special_tokens=False)
@@ -39,37 +33,46 @@ class Amex_Dataset:
         self.id_suffix_gt = self.tokenizer.encode(". Label: ", add_special_tokens=False)
         self.id_suffix_hd = self.tokenizer.encode(". Risk prob:", add_special_tokens=False)
         
-        unique_dates = self.df_series['S_2'].unique()
-        self.date_cache = {}
-        for d in unique_dates:
-            self.date_cache[d] = self.tokenizer.encode(f"Dt:{str(d)}", add_special_tokens=False)
-        self.pad_date_id = self.tokenizer.encode("PAD", add_special_tokens=False)
-
-        self.base_overhead = len(self.id_gt_intro) + len(self.id_mid) + len(self.id_suffix_gt) + 5
-        print("Dataset initialization complete.")
-
     def __len__(self):
         return (len(self.uidxs))
 
     def process_single_step(self, time_val, feats_vals, y_val, valid_step):
+        # 1. Date
         if valid_step:
-            date_ids = self.date_cache.get(time_val, self.pad_date_id)
+            date_str = f"Dt:{str(time_val)}"
         else:
-            date_ids = self.pad_date_id
+            date_str = "PAD"
+        date_ids = self.tokenizer.encode(date_str, add_special_tokens=False)
         
+        # 2. Label
         y_label_ids = self.tokenizer.encode(str(int(y_val)), add_special_tokens=False)
 
-        reserved_tokens = self.base_overhead + len(date_ids) + len(y_label_ids)
+        # 3. Features - Truncation Budget
+        reserved_tokens = len(self.id_gt_intro) + len(date_ids) + len(self.id_mid) + len(self.id_suffix_gt) + len(y_label_ids)
         available_tokens = self.max_len - reserved_tokens
         
-        # 极速构建策略：仅数值
-        vals_list = [f"{v:.2f}" for v in feats_vals]
-        vals_str = " ".join(vals_list)
-        vals_ids = self.tokenizer.encode(vals_str, add_special_tokens=False)
+        use_names = False
+        if self.feature_names is not None and len(self.feature_names) == len(feats_vals):
+            if (len(self.feature_names) * 8) < available_tokens: 
+                use_names = True
         
+        vals_ids = []
+        if use_names:
+            vals_list = [f"{n}:{v:.2f}" for n, v in zip(self.feature_names, feats_vals)]
+            vals_str = " ".join(vals_list)
+            vals_ids = self.tokenizer.encode(vals_str, add_special_tokens=False)
+            if len(vals_ids) > available_tokens:
+                use_names = False 
+        
+        if not use_names:
+            vals_list = [f"{v:.2f}" for v in feats_vals]
+            vals_str = " ".join(vals_list)
+            vals_ids = self.tokenizer.encode(vals_str, add_special_tokens=False)
+
         if len(vals_ids) > available_tokens:
             vals_ids = vals_ids[:available_tokens]
 
+        # Assembly
         gt_seq = (self.id_gt_intro + date_ids + self.id_mid + 
                   vals_ids + self.id_suffix_gt + y_label_ids)
         hd_seq = (self.id_hd_intro + date_ids + self.id_mid + 
@@ -87,7 +90,7 @@ class Amex_Dataset:
 
         label = 0
         if self.df_y is not None:
-            label = self.df_y.at[idx, self.label_name]
+            label = self.df_y.loc[idx, self.label_name]
         
         gt_ids_list = []
         hd_ids_list = []
@@ -97,19 +100,29 @@ class Amex_Dataset:
         
         for t in range(seq_len):
             if t < valid_len:
-                gt_seq, hd_seq = self.process_single_step(time_ref[t], series[t], label, True)
+                t_val = time_ref[t]
+                valid_step = True
+                feats = series[t]
             else:
-                gt_seq, hd_seq = self.process_single_step(None, np.zeros(series.shape[1]), label, False)
+                t_val = "PAD"
+                valid_step = False
+                feats = np.zeros(series.shape[1]) 
+
+            gt_seq, hd_seq = self.process_single_step(t_val, feats, label, valid_step)
             
             gt_ids_list.append(torch.tensor(gt_seq, dtype=torch.long))
             hd_ids_list.append(torch.tensor(hd_seq, dtype=torch.long))
 
+        # --- Dynamic Padding Logic ---
+        # Find max length in this sample
         local_max = 0
         for x in gt_ids_list + hd_ids_list:
             if len(x) > local_max: local_max = len(x)
         
         pad_id = self.tokenizer.pad_token_id
         
+        # Prepare padded tensors
+        # gt_input_ids: (13, local_max)
         gt_input_ids = torch.full((seq_len, local_max), pad_id, dtype=torch.long)
         gt_mask = torch.zeros((seq_len, local_max), dtype=torch.long)
         gt_lens = torch.zeros(seq_len, dtype=torch.long)
@@ -119,10 +132,13 @@ class Amex_Dataset:
         hd_lens = torch.zeros(seq_len, dtype=torch.long)
         
         for i in range(seq_len):
+            # GT
             l = len(gt_ids_list[i])
             gt_input_ids[i, :l] = gt_ids_list[i]
             gt_mask[i, :l] = 1
             gt_lens[i] = l
+            
+            # HD
             l = len(hd_ids_list[i])
             hd_input_ids[i, :l] = hd_ids_list[i]
             hd_mask[i, :l] = 1
@@ -139,17 +155,22 @@ class Amex_Dataset:
         }
 
     def collate_fn(self, batch):
-        # [修改] 这里不再需要 batch_idx 用于文件名，但为了逻辑完整保留
         batch_idx = np.array([sample['idx'] for sample in batch])
         
+        # Determine global max length in this batch
         batch_max_len = 0
         for sample in batch:
-            batch_max_len = max(batch_max_len, sample['gt_input_ids'].shape[1], sample['hd_input_ids'].shape[1])
+            if sample['gt_input_ids'].shape[1] > batch_max_len:
+                batch_max_len = sample['gt_input_ids'].shape[1]
+            if sample['hd_input_ids'].shape[1] > batch_max_len:
+                batch_max_len = sample['hd_input_ids'].shape[1]
                 
+        # Pad everything to batch_max_len
         pad_id = self.tokenizer.pad_token_id
         batch_size = len(batch)
         seq_len = 13
         
+        # Initialize final tensors
         final_gt_ids = torch.full((batch_size, seq_len, batch_max_len), pad_id, dtype=torch.long)
         final_gt_mask = torch.zeros((batch_size, seq_len, batch_max_len), dtype=torch.long)
         final_gt_lens = torch.zeros((batch_size, seq_len), dtype=torch.long)
@@ -159,13 +180,17 @@ class Amex_Dataset:
         final_hd_lens = torch.zeros((batch_size, seq_len), dtype=torch.long)
 
         for i, sample in enumerate(batch):
-            l = sample['gt_input_ids'].shape[1]
-            final_gt_ids[i, :, :l] = sample['gt_input_ids']
+            # GT
+            src = sample['gt_input_ids'] # (13, LocalL)
+            l = src.shape[1]
+            final_gt_ids[i, :, :l] = src
             final_gt_mask[i, :, :l] = sample['gt_mask']
             final_gt_lens[i, :] = sample['gt_lens']
             
-            l = sample['hd_input_ids'].shape[1]
-            final_hd_ids[i, :, :l] = sample['hd_input_ids']
+            # HD
+            src = sample['hd_input_ids']
+            l = src.shape[1]
+            final_hd_ids[i, :, :l] = src
             final_hd_mask[i, :, :l] = sample['hd_mask']
             final_hd_lens[i, :] = sample['hd_lens']
 
@@ -191,16 +216,13 @@ def parse_args():
     parser.add_argument("--l_layers", type=int, default=6)
     parser.add_argument("--data_type", type=str, default='original')
     parser.add_argument("--sampling", type=str, default='100pct')
-    # [优化] Batch Size 建议 64 - 128
-    parser.add_argument("--batch_size", type=int, default=64)
-    # [优化] 限制 Token 长度防止 OOM
-    parser.add_argument("--max_token_len", type=int, default=2048) 
+    parser.add_argument("--batch_size", type=int, default=1)
 
     return parser.parse_args()
 
 def save_train_embeddings(args, train_test='train'):
-    print(f'save_train_embeddings - V6 (Pre-allocated Huge Array)')
-    
+    print(f'save_train_embeddings - Optimized Dynamic Padding')
+
     input_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/'
     series = pd.read_feather(f'{input_path}/df_nn_series_{train_test}.feather')
     series_idx = pd.read_feather(f'{input_path}/df_nn_series_idx_{train_test}.feather').values
@@ -212,11 +234,8 @@ def save_train_embeddings(args, train_test='train'):
     dynamic_feature_names = series.drop(['customer_ID', 'S_2'], axis=1).columns.tolist()
     args.num_nodes = len(dynamic_feature_names)
 
-    # 1. 确定数据集总大小
-    total_samples = len(series_idx)
-    print(f"Total samples to process: {total_samples}")
-
-    print("Initializing Model...")
+    # 1. Initialize Model first to get Tokenizer
+    print("Initializing Model and Tokenizer...")
     gen_prompt_emb = GenPromptEmb(
         model_name=args.model_name,
         num_nodes=args.num_nodes,
@@ -228,92 +247,56 @@ def save_train_embeddings(args, train_test='train'):
         feature_names=dynamic_feature_names,
     ).to(args.device)
     
-    try:
-        gen_prompt_emb.forward_tokenized = torch.compile(gen_prompt_emb.forward_tokenized, mode="reduce-overhead")
-    except:
-        pass
-    
-    effective_max_len = min(args.max_token_len, gen_prompt_emb.max_len)
-    
     dataset = Amex_Dataset(
         series, 
         series_idx, 
         tokenizer=gen_prompt_emb.tokenizer,
         feature_names=dynamic_feature_names,
-        max_len=effective_max_len,
+        max_len=gen_prompt_emb.max_len,
         df_y=y
     )
     
     dataloader = DataLoader(
         dataset, 
         batch_size=args.batch_size, 
-        shuffle=False, # 必须为 False，保证顺序写入
+        shuffle=False, 
         drop_last=False, 
         collate_fn=dataset.collate_fn, 
         num_workers=args.num_workers,
-        pin_memory=True,
-        prefetch_factor=4
+        pin_memory=True
     )
 
-    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_04/'
+    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_04/{train_test}/'
     os.makedirs(emb_path, exist_ok=True)
-    
-    output_h5_path = os.path.join(emb_path, f"{train_test}_embeddings_all.h5")
-    print(f"Saving to: {output_h5_path}")
 
-    # [核心优化] 预分配大数组
-    # 我们不再循环 create_dataset，而是一次性创建一个巨大的 Dataset，然后填空
-    with h5py.File(output_h5_path, 'w') as hf:
-        # 创建 Embedding 存储区: (N, 13, D)
-        # chunks=True 启用自动分块，这对大数组性能至关重要
-        emb_dset = hf.create_dataset('embeddings', 
-                                     shape=(total_samples, args.input_len, args.d_model),
-                                     dtype='float32',
-                                     chunks=True)
+    bar = tqdm(dataloader)
+    for data in bar:
+        idxs = data['batch_idx']
         
-        # 创建 ID 存储区 (作为索引对照)
-        # 使用变长字符串类型
-        dt = h5py.string_dtype(encoding='utf-8')
-        id_dset = hf.create_dataset('customer_ids', 
-                                    shape=(total_samples,), 
-                                    dtype=dt)
-
-        print("Datasets created. Starting loop...")
+        # Flatten inputs: (Batch, Seq, Len) -> (Batch*Seq, Len)
+        b, s, l = data['gt_input_ids'].shape
         
-        global_idx = 0 # 全局写入指针
+        gt_input_ids = data['gt_input_ids'].view(-1, l).to(args.device)
+        gt_mask = data['gt_mask'].view(-1, l).to(args.device)
+        gt_lens = data['gt_lens'].view(-1).to(args.device)
         
-        bar = tqdm(dataloader)
-        for data in bar:
-            # 这里的 idxs 是当前 batch 的 customer_id 列表
-            batch_ids = data['batch_idx'] 
-            current_batch_size = len(batch_ids)
-            
-            b, s, l = data['gt_input_ids'].shape
-            
-            gt_input_ids = data['gt_input_ids'].view(-1, l).to(args.device)
-            gt_mask = data['gt_mask'].view(-1, l).to(args.device)
-            gt_lens = data['gt_lens'].view(-1).to(args.device)
-            
-            hd_input_ids = data['hd_input_ids'].view(-1, l).to(args.device)
-            hd_mask = data['hd_mask'].view(-1, l).to(args.device)
-            hd_lens = data['hd_lens'].view(-1).to(args.device)
+        hd_input_ids = data['hd_input_ids'].view(-1, l).to(args.device)
+        hd_mask = data['hd_mask'].view(-1, l).to(args.device)
+        hd_lens = data['hd_lens'].view(-1).to(args.device)
 
-            with torch.no_grad():
-                embeddings_batch = gen_prompt_emb.forward_tokenized(
-                    gt_input_ids, gt_mask, gt_lens,
-                    hd_input_ids, hd_mask, hd_lens
-                )
-            
-            embeddings_np = embeddings_batch.detach().cpu().numpy()
-            
-            # [核心优化] 切片写入
-            # 直接将内存块写入硬盘的连续空间，速度最快
-            emb_dset[global_idx : global_idx + current_batch_size] = embeddings_np
-            id_dset[global_idx : global_idx + current_batch_size] = [str(x) for x in batch_ids]
-            
-            global_idx += current_batch_size
+        with torch.no_grad():
+            embeddings_batch = gen_prompt_emb.forward_tokenized(
+                gt_input_ids, gt_mask, gt_lens,
+                hd_input_ids, hd_mask, hd_lens
+            )
+        
+        # Save results
+        for i, customer_id in enumerate(idxs):
+            file_path = f"{emb_path}/{customer_id}.h5"
+            customer_emb = embeddings_batch[i].detach().cpu().numpy()
+            with h5py.File(file_path, 'w') as hf:
+                hf.create_dataset('stacked_embeddings', data=customer_emb)
 
-    print("Done.")
     return 
 
 if __name__ == "__main__":

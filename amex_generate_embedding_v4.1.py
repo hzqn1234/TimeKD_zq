@@ -7,10 +7,14 @@ import numpy as np
 import pandas as pd
 import warnings
 
+# Get all available GPUs detected by the system
 gpus = list(range(torch.cuda.device_count()))
 print('Available GPUs:', gpus)
 
 class UniversalMSK(nn.Module):
+    """
+    A universal wrapper for HuggingFace AutoModels.
+    """
     def __init__(self, model_name="gpt2", device="cuda", l_layer=6):
         super(UniversalMSK, self).__init__()
         self.device = device
@@ -107,6 +111,7 @@ class GenPromptEmb(nn.Module):
         else:
             self.gpt2 = self.msk_module.to(device)
         
+        print(f"Initializing SCA with d_model={d_model}. Ensure this matches {model_name}'s hidden size!")
         self.sub_ac = SCA(d_model=self.seq_len, n_heads=1, d_ff=4*d_model, norm='LayerNorm',
                           attn_dropout=0.1, dropout=0.1, pre_norm=True, activation="gelu",
                           res_attention=True, n_layers=1, store_attn=False).to(self.device)
@@ -115,18 +120,25 @@ class GenPromptEmb(nn.Module):
             param.requires_grad = False
 
     def gather_last_token(self, hidden_states, lengths):
-        # 根据真实长度提取最后一个有效 token
+        """
+        Extracts the hidden state corresponding to the last valid token based on lengths.
+        hidden_states: (Batch, MaxLen, Dim)
+        lengths: (Batch)
+        """
         batch_size = hidden_states.shape[0]
-        # Lengths - 1 gives index
+        # Calculate indices: length - 1
+        # View as (Batch, 1, 1) to expand along dimension 2
         idx = (lengths - 1).view(batch_size, 1, 1).expand(batch_size, 1, hidden_states.size(2))
+        # Gather along sequence dimension (dim=1)
         return hidden_states.gather(1, idx).squeeze(1)
 
     def forward_tokenized(self, gt_tok_ids, gt_masks, gt_lens, hd_tok_ids, hd_masks, hd_lens):
         """
-        Forward pass with Dynamic Padding
+        Optimized forward pass with Dynamic Padding support.
         """
         batch_size_total = gt_tok_ids.shape[0]
         
+        # COMPATIBILITY: Handle Autocast
         if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast'):
             ctx = torch.amp.autocast(device_type='cuda', dtype=torch.float16)
         else:
@@ -136,6 +148,7 @@ class GenPromptEmb(nn.Module):
             gt_out = self.gpt2(gt_tok_ids, gt_masks)
             hd_out = self.gpt2(hd_tok_ids, hd_masks)
 
+        # Extract last hidden state
         if isinstance(gt_out, torch.Tensor):
             gt_hidden = gt_out
             hd_hidden = hd_out
@@ -146,10 +159,11 @@ class GenPromptEmb(nn.Module):
             gt_hidden = gt_out[0]
             hd_hidden = hd_out[0]
 
-        # Use lengths to extract the correct last token (not padding)
+        # Extract Embeddings (Last Valid Token) using Gather
         gt_emb_flat = self.gather_last_token(gt_hidden, gt_lens)
         hd_emb_flat = self.gather_last_token(hd_hidden, hd_lens)
 
+        # Reshape: (Batch*SeqLen, Dim) -> (Batch, SeqLen, Dim)
         real_batch_size = batch_size_total // self.seq_len
         
         gt_emb = gt_emb_flat.view(real_batch_size, self.seq_len, self.d_model)
