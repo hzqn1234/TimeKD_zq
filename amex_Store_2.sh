@@ -10,7 +10,7 @@
 #SBATCH -w node04
 
 CUDA_VISIBLE_DEVICES=4 \
-python amex_store_emb.py \
+python -u amex_store_emb.py \
         --num_nodes 223 \
         --data_type "original" \
         --batch_size 4 \
@@ -18,7 +18,7 @@ python amex_store_emb.py \
         --model_name "Qwen/Qwen2.5-0.5B" \
         --d_model 896 \
         --max_token_len 4096 \
-        --sampling "10pct"
+        --sampling "1pct"
 
 
 
