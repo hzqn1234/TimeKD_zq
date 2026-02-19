@@ -16,6 +16,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
+
 class Amex_Dataset:
     def __init__(self, df_series, uidxs, tokenizer, feature_names, max_len=1024, df_y=None, label_name='target', id_name='customer_ID'):
         self.df_series = df_series
@@ -229,7 +230,10 @@ def save_train_embeddings(args, train_test='train'):
     ).to(args.device)
     
     try:
-        gen_prompt_emb.forward_tokenized = torch.compile(gen_prompt_emb.forward_tokenized, mode="reduce-overhead")
+        gen_prompt_emb.forward_tokenized = torch.compile(   gen_prompt_emb.forward_tokenized, 
+                                                            mode="reduce-overhead",
+                                                            dynamic=True
+                                                            )
     except:
         pass
     

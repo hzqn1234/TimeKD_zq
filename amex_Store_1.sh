@@ -17,7 +17,7 @@ python amex_store_emb.py \
         --num_workers 8 \
         --model_name "Qwen/Qwen2.5-0.5B" \
         --d_model 896 \
-        --max_token_len 2048 \
+        --max_token_len 4096 \
         --sampling "100pct"
 
 
