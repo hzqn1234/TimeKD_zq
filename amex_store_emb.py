@@ -1,5 +1,5 @@
 import os
-# [Critical] Prevent Tokenizer deadlock & CUDA memory fragmentation
+# Prevent Tokenizer deadlock & CUDA memory fragmentation
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
@@ -8,6 +8,7 @@ import torch
 import time
 import h5py
 import argparse
+import gc
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
@@ -31,20 +32,20 @@ class Amex_Dataset:
         
         print(f"Dataset initialized with Hard Max Length: {self.max_len}")
         
-        # Extract pure Numpy arrays from Pandas to prevent RAM OOM swap!
         print("Extracting pure Numpy arrays from Pandas...")
         self.time_values = df_series['S_2'].values
         
         drop_cols = [c for c in ['customer_ID', 'S_2'] if c in df_series.columns]
-        self.series_values = df_series.drop(drop_cols, axis=1).values.astype(np.float32) # Force float32 to prevent COW
+        self.series_values = df_series.drop(drop_cols, axis=1).values.astype(np.float32) 
         
         self.y_dict = None
         if df_y is not None:
             self.y_dict = df_y[label_name].to_dict()
             
-        # Manually destroy the Pandas DataFrames so workers cannot inherit them
+        # Manually destroy the Pandas DataFrames and force Garbage Collection
         self.df_series = None
         self.df_y = None
+        gc.collect()
 
         print("Pre-computing static token IDs...")
         
@@ -161,8 +162,8 @@ class Amex_Dataset:
         for sample in batch:
             batch_max_len = max(batch_max_len, sample['gt_input_ids'].shape[1], sample['hd_input_ids'].shape[1])
         
-        # Round up to the nearest 128 to lock CUDA memory shapes
-        batch_max_len = math.ceil(batch_max_len / 128) * 128
+        # [CRITICAL FIX] Round up to nearest 512 to limit unique memory shapes to just 8 variants, fixing GPU fragmentation
+        batch_max_len = math.ceil(batch_max_len / 512) * 512
                 
         pad_id = self.tokenizer.pad_token_id
         batch_size = len(batch)
@@ -215,7 +216,7 @@ def parse_args():
     return parser.parse_args()
 
 def save_train_embeddings(args, train_test='train'):
-    print(f'save_train_embeddings - V8 (HDF5 Contiguous & CUDA Expandable)')
+    print(f'save_train_embeddings - V9 (NFS Ram Cache bypass)')
     
     input_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/'
     series = pd.read_feather(f'{input_path}/df_nn_series_{train_test}.feather')
@@ -271,50 +272,46 @@ def save_train_embeddings(args, train_test='train'):
     output_h5_path = os.path.join(emb_path, f"{train_test}_embeddings_all.h5")
     print(f"Saving to: {output_h5_path}")
 
+    # [CRITICAL FIX] Decouple Disk I/O from the GPU Loop. 
+    # Allocate a massive Numpy array in RAM (~21GB) to hold all embeddings
+    print(f"Allocating huge RAM buffer for {total_samples} samples to bypass NFS I/O...")
+    all_embeddings = np.zeros((total_samples, args.input_len, args.d_model), dtype=np.float32)
+
+    print("Starting purely GPU-bound loop...")
+    global_idx = 0 
+    
+    bar = tqdm(dataloader)
+    for data in bar:
+        batch_ids = data['batch_idx'] 
+        current_batch_size = len(batch_ids)
+        
+        b, s, l = data['gt_input_ids'].shape
+        
+        gt_input_ids = data['gt_input_ids'].view(-1, l).to(args.device, non_blocking=True)
+        gt_mask = data['gt_mask'].view(-1, l).to(args.device, non_blocking=True)
+        gt_lens = data['gt_lens'].view(-1).to(args.device, non_blocking=True)
+        
+        hd_input_ids = data['hd_input_ids'].view(-1, l).to(args.device, non_blocking=True)
+        hd_mask = data['hd_mask'].view(-1, l).to(args.device, non_blocking=True)
+        hd_lens = data['hd_lens'].view(-1).to(args.device, non_blocking=True)
+
+        with torch.no_grad():
+            embeddings_batch = gen_prompt_emb.forward_tokenized(
+                gt_input_ids, gt_mask, gt_lens,
+                hd_input_ids, hd_mask, hd_lens
+            )
+        
+        # Save straight to fast RAM, zero disk locking!
+        all_embeddings[global_idx : global_idx + current_batch_size] = embeddings_batch.detach().cpu().numpy()
+        
+        global_idx += current_batch_size
+        
+    print("Loop finished! Dumping massive RAM array to NFS disk in one shot...")
     with h5py.File(output_h5_path, 'w') as hf:
-        # [CRITICAL FIX] REMOVED chunks=chunk_shape. 
-        # This forces a flat, Contiguous O(1) layout for the 21GB dataset, skipping the massive B-Tree index overhead
-        emb_dset = hf.create_dataset('embeddings', 
-                                     shape=(total_samples, args.input_len, args.d_model),
-                                     dtype='float32')
-        
+        # Save the massive 21GB array in a single disk operation
+        hf.create_dataset('embeddings', data=all_embeddings)
         dt = h5py.string_dtype(encoding='utf-8')
-        id_dset = hf.create_dataset('customer_ids', 
-                                    shape=(total_samples,), 
-                                    dtype=dt)
-
-        print("Datasets created. Starting loop...")
-        global_idx = 0 
-        
-        bar = tqdm(dataloader)
-        for data in bar:
-            batch_ids = data['batch_idx'] 
-            current_batch_size = len(batch_ids)
-            
-            b, s, l = data['gt_input_ids'].shape
-            
-            # Using non_blocking=True to prevent pipeline locking during PCI-e transfer
-            gt_input_ids = data['gt_input_ids'].view(-1, l).to(args.device, non_blocking=True)
-            gt_mask = data['gt_mask'].view(-1, l).to(args.device, non_blocking=True)
-            gt_lens = data['gt_lens'].view(-1).to(args.device, non_blocking=True)
-            
-            hd_input_ids = data['hd_input_ids'].view(-1, l).to(args.device, non_blocking=True)
-            hd_mask = data['hd_mask'].view(-1, l).to(args.device, non_blocking=True)
-            hd_lens = data['hd_lens'].view(-1).to(args.device, non_blocking=True)
-
-            with torch.no_grad():
-                embeddings_batch = gen_prompt_emb.forward_tokenized(
-                    gt_input_ids, gt_mask, gt_lens,
-                    hd_input_ids, hd_mask, hd_lens
-                )
-            
-            embeddings_np = embeddings_batch.detach().cpu().numpy()
-            
-            emb_dset[global_idx : global_idx + current_batch_size] = embeddings_np
-            
-            global_idx += current_batch_size
-            
-        print("Bulk writing all Customer IDs to prevent HDF5 Heap Fragmentation...")
+        id_dset = hf.create_dataset('customer_ids', shape=(total_samples,), dtype=dt)
         id_dset[:] = [str(x[2]) for x in series_idx]
 
     print("Done.")
