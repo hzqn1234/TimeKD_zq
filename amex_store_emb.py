@@ -1,6 +1,7 @@
 import os
-# [关键] 防止 Tokenizer 并行导致的 CPU 死锁
+# [Critical] Prevent Tokenizer deadlock & CUDA memory fragmentation
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import math
 import torch
@@ -30,15 +31,13 @@ class Amex_Dataset:
         
         print(f"Dataset initialized with Hard Max Length: {self.max_len}")
         
-        # [CRITICAL FIX] Extract pure Numpy arrays from Pandas to prevent RAM OOM swap!
+        # Extract pure Numpy arrays from Pandas to prevent RAM OOM swap!
         print("Extracting pure Numpy arrays from Pandas...")
         self.time_values = df_series['S_2'].values
         
-        # Drop non-feature columns to create a pure float matrix
         drop_cols = [c for c in ['customer_ID', 'S_2'] if c in df_series.columns]
-        self.series_values = df_series.drop(drop_cols, axis=1).values
+        self.series_values = df_series.drop(drop_cols, axis=1).values.astype(np.float32) # Force float32 to prevent COW
         
-        # Convert labels to a pure Python dictionary
         self.y_dict = None
         if df_y is not None:
             self.y_dict = df_y[label_name].to_dict()
@@ -49,7 +48,6 @@ class Amex_Dataset:
 
         print("Pre-computing static token IDs...")
         
-        # --- Prompt Caching ---
         intro_text = "Credit risk analysis. Predict default: "
         self.id_gt_intro = self.tokenizer.encode(intro_text, add_special_tokens=False)
         self.id_hd_intro = self.tokenizer.encode(intro_text, add_special_tokens=False)
@@ -57,7 +55,6 @@ class Amex_Dataset:
         self.id_suffix_gt = self.tokenizer.encode(". Label: ", add_special_tokens=False)
         self.id_suffix_hd = self.tokenizer.encode(". Risk prob:", add_special_tokens=False)
         
-        # Build date cache from our pure Numpy array
         unique_dates = np.unique(self.time_values)
         self.date_cache = {}
         for d in unique_dates:
@@ -81,7 +78,6 @@ class Amex_Dataset:
         reserved_tokens = self.base_overhead + len(date_ids) + len(y_label_ids)
         available_tokens = self.max_len - reserved_tokens
         
-        # Values only strategy
         vals_list = [f"{v:.2f}" for v in feats_vals]
         vals_str = " ".join(vals_list)
         vals_ids = self.tokenizer.encode(vals_str, add_special_tokens=False)
@@ -99,7 +95,6 @@ class Amex_Dataset:
     def __getitem__(self, index):
         i1, i2, idx = self.uidxs[index]
         
-        # Use fast Numpy slicing instead of Pandas .iloc
         series = self.series_values[i1:i2+1]
         time_ref = self.time_values[i1:i2+1]
         
@@ -166,7 +161,7 @@ class Amex_Dataset:
         for sample in batch:
             batch_max_len = max(batch_max_len, sample['gt_input_ids'].shape[1], sample['hd_input_ids'].shape[1])
         
-        # [CRITICAL FIX 1] Round up to the nearest 128 to lock CUDA memory shapes
+        # Round up to the nearest 128 to lock CUDA memory shapes
         batch_max_len = math.ceil(batch_max_len / 128) * 128
                 
         pad_id = self.tokenizer.pad_token_id
@@ -214,13 +209,13 @@ def parse_args():
     parser.add_argument("--l_layers", type=int, default=6)
     parser.add_argument("--data_type", type=str, default='original')
     parser.add_argument("--sampling", type=str, default='100pct')
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--max_token_len", type=int, default=2048) 
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--max_token_len", type=int, default=4096) 
 
     return parser.parse_args()
 
 def save_train_embeddings(args, train_test='train'):
-    print(f'save_train_embeddings - V7 (Final Stable Multi-GPU)')
+    print(f'save_train_embeddings - V8 (HDF5 Contiguous & CUDA Expandable)')
     
     input_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/'
     series = pd.read_feather(f'{input_path}/df_nn_series_{train_test}.feather')
@@ -277,12 +272,11 @@ def save_train_embeddings(args, train_test='train'):
     print(f"Saving to: {output_h5_path}")
 
     with h5py.File(output_h5_path, 'w') as hf:
-        chunk_shape = (args.batch_size, args.input_len, args.d_model)
-        
+        # [CRITICAL FIX] REMOVED chunks=chunk_shape. 
+        # This forces a flat, Contiguous O(1) layout for the 21GB dataset, skipping the massive B-Tree index overhead
         emb_dset = hf.create_dataset('embeddings', 
                                      shape=(total_samples, args.input_len, args.d_model),
-                                     dtype='float32',
-                                     chunks=chunk_shape)
+                                     dtype='float32')
         
         dt = h5py.string_dtype(encoding='utf-8')
         id_dset = hf.create_dataset('customer_ids', 
@@ -299,13 +293,14 @@ def save_train_embeddings(args, train_test='train'):
             
             b, s, l = data['gt_input_ids'].shape
             
-            gt_input_ids = data['gt_input_ids'].view(-1, l).to(args.device)
-            gt_mask = data['gt_mask'].view(-1, l).to(args.device)
-            gt_lens = data['gt_lens'].view(-1).to(args.device)
+            # Using non_blocking=True to prevent pipeline locking during PCI-e transfer
+            gt_input_ids = data['gt_input_ids'].view(-1, l).to(args.device, non_blocking=True)
+            gt_mask = data['gt_mask'].view(-1, l).to(args.device, non_blocking=True)
+            gt_lens = data['gt_lens'].view(-1).to(args.device, non_blocking=True)
             
-            hd_input_ids = data['hd_input_ids'].view(-1, l).to(args.device)
-            hd_mask = data['hd_mask'].view(-1, l).to(args.device)
-            hd_lens = data['hd_lens'].view(-1).to(args.device)
+            hd_input_ids = data['hd_input_ids'].view(-1, l).to(args.device, non_blocking=True)
+            hd_mask = data['hd_mask'].view(-1, l).to(args.device, non_blocking=True)
+            hd_lens = data['hd_lens'].view(-1).to(args.device, non_blocking=True)
 
             with torch.no_grad():
                 embeddings_batch = gen_prompt_emb.forward_tokenized(
@@ -315,12 +310,10 @@ def save_train_embeddings(args, train_test='train'):
             
             embeddings_np = embeddings_batch.detach().cpu().numpy()
             
-            # Append float embeddings instantly
             emb_dset[global_idx : global_idx + current_batch_size] = embeddings_np
             
             global_idx += current_batch_size
             
-        # [CRITICAL FIX 2] Bulk write the variable-length strings at the very end 
         print("Bulk writing all Customer IDs to prevent HDF5 Heap Fragmentation...")
         id_dset[:] = [str(x[2]) for x in series_idx]
 
