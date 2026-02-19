@@ -13,7 +13,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 \
 python amex_store_emb.py \
         --num_nodes 223 \
         --data_type "original" \
-        --batch_size 16 \
+        --batch_size 32 \
         --num_workers 8 \
         --model_name "Qwen/Qwen2.5-0.5B" \
         --d_model 896 \

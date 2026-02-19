@@ -2,6 +2,7 @@ import os
 # [关键] 防止 Tokenizer 并行导致的 CPU 死锁
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+import math
 import torch
 import time
 import h5py
@@ -19,8 +20,6 @@ from datetime import datetime
 
 class Amex_Dataset:
     def __init__(self, df_series, uidxs, tokenizer, feature_names, max_len=1024, df_y=None, label_name='target', id_name='customer_ID'):
-        self.df_series = df_series
-        self.df_y = df_y
         self.uidxs = uidxs
         self.label_name = label_name
         self.id_name = id_name
@@ -30,9 +29,27 @@ class Amex_Dataset:
         self.max_len = max_len
         
         print(f"Dataset initialized with Hard Max Length: {self.max_len}")
+        
+        # [CRITICAL FIX] Extract pure Numpy arrays from Pandas to prevent RAM OOM swap!
+        print("Extracting pure Numpy arrays from Pandas...")
+        self.time_values = df_series['S_2'].values
+        
+        # Drop non-feature columns to create a pure float matrix
+        drop_cols = [c for c in ['customer_ID', 'S_2'] if c in df_series.columns]
+        self.series_values = df_series.drop(drop_cols, axis=1).values
+        
+        # Convert labels to a pure Python dictionary
+        self.y_dict = None
+        if df_y is not None:
+            self.y_dict = df_y[label_name].to_dict()
+            
+        # Manually destroy the Pandas DataFrames so workers cannot inherit them
+        self.df_series = None
+        self.df_y = None
+
         print("Pre-computing static token IDs...")
         
-        # --- 缓存优化 ---
+        # --- Prompt Caching ---
         intro_text = "Credit risk analysis. Predict default: "
         self.id_gt_intro = self.tokenizer.encode(intro_text, add_special_tokens=False)
         self.id_hd_intro = self.tokenizer.encode(intro_text, add_special_tokens=False)
@@ -40,7 +57,8 @@ class Amex_Dataset:
         self.id_suffix_gt = self.tokenizer.encode(". Label: ", add_special_tokens=False)
         self.id_suffix_hd = self.tokenizer.encode(". Risk prob:", add_special_tokens=False)
         
-        unique_dates = self.df_series['S_2'].unique()
+        # Build date cache from our pure Numpy array
+        unique_dates = np.unique(self.time_values)
         self.date_cache = {}
         for d in unique_dates:
             self.date_cache[d] = self.tokenizer.encode(f"Dt:{str(d)}", add_special_tokens=False)
@@ -63,7 +81,7 @@ class Amex_Dataset:
         reserved_tokens = self.base_overhead + len(date_ids) + len(y_label_ids)
         available_tokens = self.max_len - reserved_tokens
         
-        # 极速构建策略：仅数值
+        # Values only strategy
         vals_list = [f"{v:.2f}" for v in feats_vals]
         vals_str = " ".join(vals_list)
         vals_ids = self.tokenizer.encode(vals_str, add_special_tokens=False)
@@ -80,15 +98,17 @@ class Amex_Dataset:
 
     def __getitem__(self, index):
         i1, i2, idx = self.uidxs[index]
-        series = self.df_series.iloc[i1:i2+1, 1:].drop(['S_2'], axis=1).values
-        time_ref = self.df_series.iloc[i1:i2+1, 1:]['S_2'].values
+        
+        # Use fast Numpy slicing instead of Pandas .iloc
+        series = self.series_values[i1:i2+1]
+        time_ref = self.time_values[i1:i2+1]
         
         if len(series.shape) == 1:
             series = series.reshape((-1,) + series.shape[-1:])
 
         label = 0
-        if self.df_y is not None:
-            label = self.df_y.at[idx, self.label_name]
+        if self.y_dict is not None:
+            label = self.y_dict.get(idx, 0)
         
         gt_ids_list = []
         hd_ids_list = []
@@ -145,6 +165,9 @@ class Amex_Dataset:
         batch_max_len = 0
         for sample in batch:
             batch_max_len = max(batch_max_len, sample['gt_input_ids'].shape[1], sample['hd_input_ids'].shape[1])
+        
+        # [CRITICAL FIX 1] Round up to the nearest 128 to lock CUDA memory shapes
+        batch_max_len = math.ceil(batch_max_len / 128) * 128
                 
         pad_id = self.tokenizer.pad_token_id
         batch_size = len(batch)
@@ -191,15 +214,13 @@ def parse_args():
     parser.add_argument("--l_layers", type=int, default=6)
     parser.add_argument("--data_type", type=str, default='original')
     parser.add_argument("--sampling", type=str, default='100pct')
-    # [优化] Batch Size 建议 64 - 128
     parser.add_argument("--batch_size", type=int, default=64)
-    # [优化] 限制 Token 长度防止 OOM
     parser.add_argument("--max_token_len", type=int, default=2048) 
 
     return parser.parse_args()
 
 def save_train_embeddings(args, train_test='train'):
-    print(f'save_train_embeddings - V6 (Pre-allocated Huge Array)')
+    print(f'save_train_embeddings - V7 (Final Stable Multi-GPU)')
     
     input_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/'
     series = pd.read_feather(f'{input_path}/df_nn_series_{train_test}.feather')
@@ -212,7 +233,6 @@ def save_train_embeddings(args, train_test='train'):
     dynamic_feature_names = series.drop(['customer_ID', 'S_2'], axis=1).columns.tolist()
     args.num_nodes = len(dynamic_feature_names)
 
-    # 1. 确定数据集总大小
     total_samples = len(series_idx)
     print(f"Total samples to process: {total_samples}")
 
@@ -228,18 +248,6 @@ def save_train_embeddings(args, train_test='train'):
         feature_names=dynamic_feature_names,
     ).to(args.device)
     
-    # [FIX 1] COMPLETELY DISABLED TORCH.COMPILE
-    # torch.compile completely conflicts with nn.DataParallel multi-threading.
-    # We remove it to maintain constant execution speed.
-    # try:
-    #     gen_prompt_emb.forward_tokenized = torch.compile(   
-    #         gen_prompt_emb.forward_tokenized, 
-    #         mode="reduce-overhead",
-    #         dynamic=True
-    #     )
-    # except:
-    #     pass
-    
     effective_max_len = min(args.max_token_len, gen_prompt_emb.max_len)
     
     dataset = Amex_Dataset(
@@ -254,7 +262,7 @@ def save_train_embeddings(args, train_test='train'):
     dataloader = DataLoader(
         dataset, 
         batch_size=args.batch_size, 
-        shuffle=False, # 必须为 False，保证顺序写入
+        shuffle=False, 
         drop_last=False, 
         collate_fn=dataset.collate_fn, 
         num_workers=args.num_workers,
@@ -268,12 +276,7 @@ def save_train_embeddings(args, train_test='train'):
     output_h5_path = os.path.join(emb_path, f"{train_test}_embeddings_all.h5")
     print(f"Saving to: {output_h5_path}")
 
-    # [核心优化] 预分配大数组
-    # 我们不再循环 create_dataset，而是一次性创建一个巨大的 Dataset，然后填空
     with h5py.File(output_h5_path, 'w') as hf:
-        
-        # [FIX 2] EXPLICIT HDF5 CHUNKING
-        # Set chunking perfectly to match batch size and dimensions to avoid I/O thrashing
         chunk_shape = (args.batch_size, args.input_len, args.d_model)
         
         emb_dset = hf.create_dataset('embeddings', 
@@ -281,20 +284,16 @@ def save_train_embeddings(args, train_test='train'):
                                      dtype='float32',
                                      chunks=chunk_shape)
         
-        # 创建 ID 存储区 (作为索引对照)
-        # 使用变长字符串类型
         dt = h5py.string_dtype(encoding='utf-8')
         id_dset = hf.create_dataset('customer_ids', 
                                     shape=(total_samples,), 
                                     dtype=dt)
 
         print("Datasets created. Starting loop...")
-        
-        global_idx = 0 # 全局写入指针
+        global_idx = 0 
         
         bar = tqdm(dataloader)
         for data in bar:
-            # 这里的 idxs 是当前 batch 的 customer_id 列表
             batch_ids = data['batch_idx'] 
             current_batch_size = len(batch_ids)
             
@@ -316,12 +315,14 @@ def save_train_embeddings(args, train_test='train'):
             
             embeddings_np = embeddings_batch.detach().cpu().numpy()
             
-            # [核心优化] 切片写入
-            # 直接将内存块写入硬盘的连续空间，速度最快
+            # Append float embeddings instantly
             emb_dset[global_idx : global_idx + current_batch_size] = embeddings_np
-            id_dset[global_idx : global_idx + current_batch_size] = [str(x) for x in batch_ids]
             
             global_idx += current_batch_size
+            
+        # [CRITICAL FIX 2] Bulk write the variable-length strings at the very end 
+        print("Bulk writing all Customer IDs to prevent HDF5 Heap Fragmentation...")
+        id_dset[:] = [str(x[2]) for x in series_idx]
 
     print("Done.")
     return 
