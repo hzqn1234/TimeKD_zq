@@ -5,6 +5,7 @@ import argparse
 import time
 import os
 import random
+import glob
 from torch.utils.data import DataLoader
 from model.CAI_model import Amodel
 from utils.kd_loss import KDLoss
@@ -77,27 +78,24 @@ class Amex_Dataset:
         self.id_name = id_name
         self.is_train = df_y is not None
         
-        # [V6 优化] 建立 CustomerID -> Row Index 的快速查找表
+        # [V6 优化] 支持多个 Chunk 的查找表
         if self.is_train:
-            self.emb_file_path = os.path.join(emb_path, "train_embeddings_all.h5")
-            print(f"Loading embedding index from: {self.emb_file_path}")
-            
-            # 我们需要知道每个 customer_id 在 HDF5 里的行号
-            # 一次性读取所有 ID 到内存（字符串列表占用内存很小，几百MB）
-            with h5py.File(self.emb_file_path, 'r') as hf:
-                # 获取所有 ID，注意 decode
-                all_ids = hf['customer_ids'][:]
+            chunk_files = glob.glob(os.path.join(emb_path, "train_embeddings_chunk_*.h5"))
+            if not chunk_files: # Fallback backwards compatibility
+                chunk_files = [os.path.join(emb_path, "train_embeddings_all.h5")]
                 
-            # 构建哈希表：Key=CustomerID, Value=Row_Index
-            # all_ids 可能是 bytes 类型，需要 decode
-            self.id_to_row = {}
-            for i, cid in enumerate(all_ids):
-                # 处理 bytes 和 str 的兼容性
-                if isinstance(cid, bytes):
-                    cid = cid.decode('utf-8')
-                self.id_to_row[str(cid)] = i
+            self.id_to_file_and_row = {}
+            for fpath in chunk_files:
+                print(f"Loading embedding index from chunk: {fpath}")
+                with h5py.File(fpath, 'r') as hf:
+                    all_ids = hf['customer_ids'][:]
+                    
+                for i, cid in enumerate(all_ids):
+                    if isinstance(cid, bytes):
+                        cid = cid.decode('utf-8')
+                    self.id_to_file_and_row[str(cid)] = (fpath, i)
             
-            print(f"Index built. Total mapped IDs: {len(self.id_to_row)}")
+            print(f"Index built. Total mapped IDs across chunks: {len(self.id_to_file_and_row)}")
 
     def __len__(self):
         return (len(self.uidxs))
@@ -111,15 +109,16 @@ class Amex_Dataset:
             series = series.reshape((-1,) + series.shape[-1:])
         
         if self.is_train:
-            # [V6 优化] 查表 + 随机读取
-            # 1. 查找 idx 对应的行号
-            row_idx = self.id_to_row.get(str(idx))
+            # 1. 查找 idx 对应的文件和行号
+            mapping = self.id_to_file_and_row.get(str(idx))
             
-            if row_idx is None:
-                raise ValueError(f"Customer ID {idx} not found in embedding file!")
+            if mapping is None:
+                raise ValueError(f"Customer ID {idx} not found in any embedding chunk!")
+            
+            fpath, row_idx = mapping
 
-            # 2. 从大数组中读取该行
-            with h5py.File(self.emb_file_path, 'r') as hf:
+            # 2. 从对应的分块中读取
+            with h5py.File(fpath, 'r') as hf:
                 emb_data = hf['embeddings'][row_idx]
                 emb_tensor = torch.from_numpy(emb_data)
 
