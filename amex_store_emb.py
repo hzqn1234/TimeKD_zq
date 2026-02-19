@@ -1,11 +1,9 @@
 import os
-# Prevent Tokenizer deadlock & CUDA memory fragmentation
+# Prevent Tokenizer deadlock
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import math
 import torch
-import time
 import h5py
 import argparse
 import gc
@@ -21,33 +19,24 @@ from datetime import datetime
 
 
 class Amex_Dataset:
-    def __init__(self, df_series, uidxs, tokenizer, feature_names, max_len=1024, df_y=None, label_name='target', id_name='customer_ID'):
-        self.uidxs = uidxs
-        self.label_name = label_name
-        self.id_name = id_name
-        
+    def __init__(self, series_values, time_values_int, i1_i2_array, labels_array, date_token_cache, tokenizer, max_len):
+        self.series_values = series_values
+        self.time_values_int = time_values_int
+        self.i1_i2_array = i1_i2_array
+        self.labels_array = labels_array
+        self.date_token_cache = date_token_cache
         self.tokenizer = tokenizer
-        self.feature_names = feature_names
         self.max_len = max_len
         
-        print(f"Dataset initialized with Hard Max Length: {self.max_len}")
+        self.pad_date_id = self.tokenizer.encode("PAD", add_special_tokens=False)
         
-        print("Extracting pure Numpy arrays from Pandas...")
-        self.time_values = df_series['S_2'].values
-        
-        drop_cols = [c for c in ['customer_ID', 'S_2'] if c in df_series.columns]
-        self.series_values = df_series.drop(drop_cols, axis=1).values.astype(np.float32) 
-        
-        self.y_dict = None
-        if df_y is not None:
-            self.y_dict = df_y[label_name].to_dict()
-            
-        # Manually destroy the Pandas DataFrames and force Garbage Collection
-        self.df_series = None
-        self.df_y = None
-        gc.collect()
-
-        print("Pre-computing static token IDs...")
+        self.y_cache = {
+            0: self.tokenizer.encode("0", add_special_tokens=False),
+            1: self.tokenizer.encode("1", add_special_tokens=False)
+        }
+        num_feats = self.series_values.shape[1]
+        zero_vals_str = " ".join([f"{0.0:.2f}"] * num_feats)
+        self.zero_vals_ids = self.tokenizer.encode(zero_vals_str, add_special_tokens=False)
         
         intro_text = "Credit risk analysis. Predict default: "
         self.id_gt_intro = self.tokenizer.encode(intro_text, add_special_tokens=False)
@@ -56,32 +45,24 @@ class Amex_Dataset:
         self.id_suffix_gt = self.tokenizer.encode(". Label: ", add_special_tokens=False)
         self.id_suffix_hd = self.tokenizer.encode(". Risk prob:", add_special_tokens=False)
         
-        unique_dates = np.unique(self.time_values)
-        self.date_cache = {}
-        for d in unique_dates:
-            self.date_cache[d] = self.tokenizer.encode(f"Dt:{str(d)}", add_special_tokens=False)
-        self.pad_date_id = self.tokenizer.encode("PAD", add_special_tokens=False)
-
         self.base_overhead = len(self.id_gt_intro) + len(self.id_mid) + len(self.id_suffix_gt) + 5
-        print("Dataset initialization complete.")
 
     def __len__(self):
-        return (len(self.uidxs))
+        return len(self.i1_i2_array)
 
-    def process_single_step(self, time_val, feats_vals, y_val, valid_step):
+    def process_single_step(self, time_int, feats_vals, y_val, valid_step):
+        y_label_ids = self.y_cache.get(y_val, self.y_cache[0])
+        
         if valid_step:
-            date_ids = self.date_cache.get(time_val, self.pad_date_id)
+            date_ids = self.date_token_cache.get(int(time_int), self.pad_date_id)
+            vals_list = [f"{v:.2f}" for v in feats_vals]
+            vals_ids = self.tokenizer.encode(" ".join(vals_list), add_special_tokens=False)
         else:
             date_ids = self.pad_date_id
+            vals_ids = self.zero_vals_ids 
         
-        y_label_ids = self.tokenizer.encode(str(int(y_val)), add_special_tokens=False)
-
         reserved_tokens = self.base_overhead + len(date_ids) + len(y_label_ids)
         available_tokens = self.max_len - reserved_tokens
-        
-        vals_list = [f"{v:.2f}" for v in feats_vals]
-        vals_str = " ".join(vals_list)
-        vals_ids = self.tokenizer.encode(vals_str, add_special_tokens=False)
         
         if len(vals_ids) > available_tokens:
             vals_ids = vals_ids[:available_tokens]
@@ -94,29 +75,26 @@ class Amex_Dataset:
         return gt_seq, hd_seq
 
     def __getitem__(self, index):
-        i1, i2, idx = self.uidxs[index]
+        i1, i2 = self.i1_i2_array[index]
+        label = self.labels_array[index]
         
         series = self.series_values[i1:i2+1]
-        time_ref = self.time_values[i1:i2+1]
+        time_ref_ints = self.time_values_int[i1:i2+1]
         
         if len(series.shape) == 1:
             series = series.reshape((-1,) + series.shape[-1:])
-
-        label = 0
-        if self.y_dict is not None:
-            label = self.y_dict.get(idx, 0)
         
         gt_ids_list = []
         hd_ids_list = []
         
         seq_len = 13
-        valid_len = len(time_ref)
+        valid_len = len(time_ref_ints)
         
         for t in range(seq_len):
             if t < valid_len:
-                gt_seq, hd_seq = self.process_single_step(time_ref[t], series[t], label, True)
+                gt_seq, hd_seq = self.process_single_step(time_ref_ints[t], series[t], label, True)
             else:
-                gt_seq, hd_seq = self.process_single_step(None, np.zeros(series.shape[1]), label, False)
+                gt_seq, hd_seq = self.process_single_step(None, None, label, False)
             
             gt_ids_list.append(torch.tensor(gt_seq, dtype=torch.long))
             hd_ids_list.append(torch.tensor(hd_seq, dtype=torch.long))
@@ -146,7 +124,6 @@ class Amex_Dataset:
             hd_lens[i] = l
 
         return {
-            'idx': idx,
             'gt_input_ids': gt_input_ids,
             'gt_mask': gt_mask,
             'gt_lens': gt_lens,
@@ -156,13 +133,10 @@ class Amex_Dataset:
         }
 
     def collate_fn(self, batch):
-        batch_idx = np.array([sample['idx'] for sample in batch])
-        
         batch_max_len = 0
         for sample in batch:
             batch_max_len = max(batch_max_len, sample['gt_input_ids'].shape[1], sample['hd_input_ids'].shape[1])
         
-        # [CRITICAL FIX] Round up to nearest 512 to limit unique memory shapes to just 8 variants, fixing GPU fragmentation
         batch_max_len = math.ceil(batch_max_len / 512) * 512
                 
         pad_id = self.tokenizer.pad_token_id
@@ -189,7 +163,6 @@ class Amex_Dataset:
             final_hd_lens[i, :] = sample['hd_lens']
 
         return {
-            'batch_idx': batch_idx,
             'gt_input_ids': final_gt_ids,
             'gt_mask': final_gt_mask,
             'gt_lens': final_gt_lens,
@@ -210,17 +183,21 @@ def parse_args():
     parser.add_argument("--l_layers", type=int, default=6)
     parser.add_argument("--data_type", type=str, default='original')
     parser.add_argument("--sampling", type=str, default='100pct')
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--max_token_len", type=int, default=4096) 
+    
+    # [NEW] Chunking Arguments for exact OS-Level split
+    parser.add_argument("--chunk_id", type=int, default=0)
+    parser.add_argument("--total_chunks", type=int, default=1)
 
     return parser.parse_args()
 
 def save_train_embeddings(args, train_test='train'):
-    print(f'save_train_embeddings - V9 (NFS Ram Cache bypass)')
+    print(f'save_train_embeddings - V12 (Single-GPU Chunked + Zero IPC)')
     
     input_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/'
     series = pd.read_feather(f'{input_path}/df_nn_series_{train_test}.feather')
-    series_idx = pd.read_feather(f'{input_path}/df_nn_series_idx_{train_test}.feather').values
+    series_idx_full = pd.read_feather(f'{input_path}/df_nn_series_idx_{train_test}.feather').values
     
     y = None
     if train_test == 'train':
@@ -229,8 +206,16 @@ def save_train_embeddings(args, train_test='train'):
     dynamic_feature_names = series.drop(['customer_ID', 'S_2'], axis=1).columns.tolist()
     args.num_nodes = len(dynamic_feature_names)
 
+    # --- NEW CHUNKING LOGIC ---
+    total_samples_full = len(series_idx_full)
+    chunk_size = math.ceil(total_samples_full / args.total_chunks)
+    start_idx = args.chunk_id * chunk_size
+    end_idx = min(start_idx + chunk_size, total_samples_full)
+    
+    series_idx = series_idx_full[start_idx:end_idx]
     total_samples = len(series_idx)
-    print(f"Total samples to process: {total_samples}")
+    print(f"GPU Chunk {args.chunk_id + 1}/{args.total_chunks} processing {total_samples} samples...")
+    # --------------------------
 
     print("Initializing Model...")
     gen_prompt_emb = GenPromptEmb(
@@ -246,13 +231,35 @@ def save_train_embeddings(args, train_test='train'):
     
     effective_max_len = min(args.max_token_len, gen_prompt_emb.max_len)
     
+    print("Mapping strings to raw numeric arrays for zero-IPC worker pipeline...")
+    labels_array = np.zeros(total_samples, dtype=np.int8)
+    if y is not None:
+        y_dict = y.set_index('customer_ID')['target'].to_dict()
+        for i, row in enumerate(series_idx):
+            labels_array[i] = y_dict.get(row[2], 0)
+            
+    unique_dates = series['S_2'].unique()
+    date_to_int = {date: i for i, date in enumerate(unique_dates)}
+    time_values_int = series['S_2'].map(date_to_int).values.astype(np.int16)
+    date_token_cache = {i: gen_prompt_emb.tokenizer.encode(f"Dt:{str(date)}", add_special_tokens=False) for date, i in date_to_int.items()}
+
+    drop_cols = [c for c in ['customer_ID', 'S_2'] if c in series.columns]
+    series_values = series.drop(drop_cols, axis=1).values.astype(np.float32)
+    
+    i1_i2_array = series_idx[:, :2].astype(np.int32)
+    
+    del series
+    del y
+    gc.collect()
+    
     dataset = Amex_Dataset(
-        series, 
-        series_idx, 
+        series_values=series_values,
+        time_values_int=time_values_int,
+        i1_i2_array=i1_i2_array,
+        labels_array=labels_array,
+        date_token_cache=date_token_cache,
         tokenizer=gen_prompt_emb.tokenizer,
-        feature_names=dynamic_feature_names,
-        max_len=effective_max_len,
-        df_y=y
+        max_len=effective_max_len
     )
     
     dataloader = DataLoader(
@@ -269,49 +276,46 @@ def save_train_embeddings(args, train_test='train'):
     emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_04/'
     os.makedirs(emb_path, exist_ok=True)
     
-    output_h5_path = os.path.join(emb_path, f"{train_test}_embeddings_all.h5")
+    output_h5_path = os.path.join(emb_path, f"{train_test}_embeddings_chunk_{args.chunk_id}.h5")
     print(f"Saving to: {output_h5_path}")
 
-    # [CRITICAL FIX] Decouple Disk I/O from the GPU Loop. 
-    # Allocate a massive Numpy array in RAM (~21GB) to hold all embeddings
-    print(f"Allocating huge RAM buffer for {total_samples} samples to bypass NFS I/O...")
-    all_embeddings = np.zeros((total_samples, args.input_len, args.d_model), dtype=np.float32)
-
-    print("Starting purely GPU-bound loop...")
-    global_idx = 0 
-    
-    bar = tqdm(dataloader)
-    for data in bar:
-        batch_ids = data['batch_idx'] 
-        current_batch_size = len(batch_ids)
-        
-        b, s, l = data['gt_input_ids'].shape
-        
-        gt_input_ids = data['gt_input_ids'].view(-1, l).to(args.device, non_blocking=True)
-        gt_mask = data['gt_mask'].view(-1, l).to(args.device, non_blocking=True)
-        gt_lens = data['gt_lens'].view(-1).to(args.device, non_blocking=True)
-        
-        hd_input_ids = data['hd_input_ids'].view(-1, l).to(args.device, non_blocking=True)
-        hd_mask = data['hd_mask'].view(-1, l).to(args.device, non_blocking=True)
-        hd_lens = data['hd_lens'].view(-1).to(args.device, non_blocking=True)
-
-        with torch.no_grad():
-            embeddings_batch = gen_prompt_emb.forward_tokenized(
-                gt_input_ids, gt_mask, gt_lens,
-                hd_input_ids, hd_mask, hd_lens
-            )
-        
-        # Save straight to fast RAM, zero disk locking!
-        all_embeddings[global_idx : global_idx + current_batch_size] = embeddings_batch.detach().cpu().numpy()
-        
-        global_idx += current_batch_size
-        
-    print("Loop finished! Dumping massive RAM array to NFS disk in one shot...")
     with h5py.File(output_h5_path, 'w') as hf:
-        # Save the massive 21GB array in a single disk operation
-        hf.create_dataset('embeddings', data=all_embeddings)
+        emb_dset = hf.create_dataset('embeddings', 
+                                     shape=(total_samples, args.input_len, args.d_model),
+                                     dtype='float32') 
+        
         dt = h5py.string_dtype(encoding='utf-8')
-        id_dset = hf.create_dataset('customer_ids', shape=(total_samples,), dtype=dt)
+        id_dset = hf.create_dataset('customer_ids', 
+                                    shape=(total_samples,), 
+                                    dtype=dt)
+
+        print("Starting perfectly stable GPU-bound loop...")
+        global_idx = 0 
+        
+        bar = tqdm(dataloader)
+        for data in bar:
+            current_batch_size = data['gt_input_ids'].shape[0]
+            
+            b, s, l = data['gt_input_ids'].shape
+            
+            gt_input_ids = data['gt_input_ids'].view(-1, l).to(args.device, non_blocking=True)
+            gt_mask = data['gt_mask'].view(-1, l).to(args.device, non_blocking=True)
+            gt_lens = data['gt_lens'].view(-1).to(args.device, non_blocking=True)
+            
+            hd_input_ids = data['hd_input_ids'].view(-1, l).to(args.device, non_blocking=True)
+            hd_mask = data['hd_mask'].view(-1, l).to(args.device, non_blocking=True)
+            hd_lens = data['hd_lens'].view(-1).to(args.device, non_blocking=True)
+
+            with torch.no_grad():
+                embeddings_batch = gen_prompt_emb.forward_tokenized(
+                    gt_input_ids, gt_mask, gt_lens,
+                    hd_input_ids, hd_mask, hd_lens
+                )
+            
+            emb_dset[global_idx : global_idx + current_batch_size] = embeddings_batch.detach().cpu().numpy()
+            
+            global_idx += current_batch_size
+            
         id_dset[:] = [str(x[2]) for x in series_idx]
 
     print("Done.")

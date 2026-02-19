@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import warnings
 
+# Get all available GPUs detected by the system
 gpus = list(range(torch.cuda.device_count()))
 print('Available GPUs:', gpus)
 
@@ -102,10 +103,8 @@ class GenPromptEmb(nn.Module):
             
         self.msk_module = UniversalMSK(model_name=model_name, device=self.device, l_layer=l_layer)
         
-        if len(gpus) > 1:
-            self.gpt2 = nn.DataParallel(self.msk_module, device_ids=gpus).cuda()
-        else:
-            self.gpt2 = self.msk_module.to(device)
+        # [CRITICAL FIX] Removed nn.DataParallel to prevent GIL Thread locking and memory fragmentation
+        self.gpt2 = self.msk_module.to(self.device)
         
         self.sub_ac = SCA(d_model=self.seq_len, n_heads=1, d_ff=4*d_model, norm='LayerNorm',
                           attn_dropout=0.1, dropout=0.1, pre_norm=True, activation="gelu",
@@ -115,16 +114,11 @@ class GenPromptEmb(nn.Module):
             param.requires_grad = False
 
     def gather_last_token(self, hidden_states, lengths):
-        # 根据真实长度提取最后一个有效 token
         batch_size = hidden_states.shape[0]
-        # Lengths - 1 gives index
         idx = (lengths - 1).view(batch_size, 1, 1).expand(batch_size, 1, hidden_states.size(2))
         return hidden_states.gather(1, idx).squeeze(1)
 
     def forward_tokenized(self, gt_tok_ids, gt_masks, gt_lens, hd_tok_ids, hd_masks, hd_lens):
-        """
-        Forward pass with Dynamic Padding
-        """
         batch_size_total = gt_tok_ids.shape[0]
         
         if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast'):
@@ -146,7 +140,6 @@ class GenPromptEmb(nn.Module):
             gt_hidden = gt_out[0]
             hd_hidden = hd_out[0]
 
-        # Use lengths to extract the correct last token (not padding)
         gt_emb_flat = self.gather_last_token(gt_hidden, gt_lens)
         hd_emb_flat = self.gather_last_token(hd_hidden, hd_lens)
 
@@ -155,12 +148,12 @@ class GenPromptEmb(nn.Module):
         gt_emb = gt_emb_flat.view(real_batch_size, self.seq_len, self.d_model)
         hd_emb = hd_emb_flat.view(real_batch_size, self.seq_len, self.d_model)
 
-        gt_emb = gt_emb.permute(0, 2, 1) # (B, D, S)
+        gt_emb = gt_emb.permute(0, 2, 1) 
         hd_emb = hd_emb.permute(0, 2, 1)
 
         sub_out = self.sub_ac(gt_emb, hd_emb, hd_emb)
         
-        return sub_out.permute(0, 2, 1) # (B, S, D)
+        return sub_out.permute(0, 2, 1) 
 
     def generate_embeddings(self, x, y, time_ref):
         pass
