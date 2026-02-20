@@ -4,6 +4,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
 import time
+import math
 import h5py
 import argparse
 from torch.utils.data import DataLoader
@@ -196,14 +197,18 @@ def parse_args():
     # [优化] 限制 Token 长度防止 OOM
     parser.add_argument("--max_token_len", type=int, default=2048) 
 
+    # [CHUNK LOGIC]
+    parser.add_argument("--chunk_id", type=int, default=0)
+    parser.add_argument("--total_chunks", type=int, default=1)
+
     return parser.parse_args()
 
 def save_train_embeddings(args, train_test='train'):
-    print(f'save_train_embeddings - V6 (Pre-allocated Huge Array)')
+    print(f'save_train_embeddings - V6 (Pre-allocated Huge Array + Bulletproof OS Chunking)')
     
     input_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/'
     series = pd.read_feather(f'{input_path}/df_nn_series_{train_test}.feather')
-    series_idx = pd.read_feather(f'{input_path}/df_nn_series_idx_{train_test}.feather').values
+    series_idx_full = pd.read_feather(f'{input_path}/df_nn_series_idx_{train_test}.feather').values
     
     y = None
     if train_test == 'train':
@@ -212,9 +217,21 @@ def save_train_embeddings(args, train_test='train'):
     dynamic_feature_names = series.drop(['customer_ID', 'S_2'], axis=1).columns.tolist()
     args.num_nodes = len(dynamic_feature_names)
 
-    # 1. 确定数据集总大小
+    # --- PURE OS LEVEL CHUNKING LOGIC ---
+    total_samples_full = len(series_idx_full)
+    
+    # Use np.array_split for mathematically perfect, load-balanced chunks
+    splits = np.array_split(series_idx_full, args.total_chunks)
+    series_idx = splits[args.chunk_id]
+    
     total_samples = len(series_idx)
-    print(f"Total samples to process: {total_samples}")
+    print(f"GPU Chunk {args.chunk_id + 1}/{args.total_chunks} processing {total_samples} samples out of {total_samples_full}...")
+    
+    # Handle zero-sample edge case gracefully
+    if total_samples == 0:
+        print(f"Chunk {args.chunk_id} has 0 samples. Exiting early.")
+        return
+    # ------------------------------------
 
     print("Initializing Model...")
     gen_prompt_emb = GenPromptEmb(
@@ -227,18 +244,6 @@ def save_train_embeddings(args, train_test='train'):
         l_layer=args.l_layers,
         feature_names=dynamic_feature_names,
     ).to(args.device)
-    
-    # [FIX 1] COMPLETELY DISABLED TORCH.COMPILE
-    # torch.compile completely conflicts with nn.DataParallel multi-threading.
-    # We remove it to maintain constant execution speed.
-    # try:
-    #     gen_prompt_emb.forward_tokenized = torch.compile(   
-    #         gen_prompt_emb.forward_tokenized, 
-    #         mode="reduce-overhead",
-    #         dynamic=True
-    #     )
-    # except:
-    #     pass
     
     effective_max_len = min(args.max_token_len, gen_prompt_emb.max_len)
     
@@ -254,7 +259,7 @@ def save_train_embeddings(args, train_test='train'):
     dataloader = DataLoader(
         dataset, 
         batch_size=args.batch_size, 
-        shuffle=False, # 必须为 False，保证顺序写入
+        shuffle=False, 
         drop_last=False, 
         collate_fn=dataset.collate_fn, 
         num_workers=args.num_workers,
@@ -265,24 +270,21 @@ def save_train_embeddings(args, train_test='train'):
     emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_04/'
     os.makedirs(emb_path, exist_ok=True)
     
-    output_h5_path = os.path.join(emb_path, f"{train_test}_embeddings_all.h5")
+    output_h5_path = os.path.join(emb_path, f"{train_test}_embeddings_chunk_{args.chunk_id}.h5")
     print(f"Saving to: {output_h5_path}")
 
     # [核心优化] 预分配大数组
-    # 我们不再循环 create_dataset，而是一次性创建一个巨大的 Dataset，然后填空
     with h5py.File(output_h5_path, 'w') as hf:
         
-        # [FIX 2] EXPLICIT HDF5 CHUNKING
-        # Set chunking perfectly to match batch size and dimensions to avoid I/O thrashing
-        chunk_shape = (args.batch_size, args.input_len, args.d_model)
+        # Prevent HDF5 crash if total_samples < batch_size
+        chunk_dim_0 = min(args.batch_size, total_samples)
+        chunk_shape = (chunk_dim_0, args.input_len, args.d_model)
         
         emb_dset = hf.create_dataset('embeddings', 
                                      shape=(total_samples, args.input_len, args.d_model),
                                      dtype='float32',
                                      chunks=chunk_shape)
         
-        # 创建 ID 存储区 (作为索引对照)
-        # 使用变长字符串类型
         dt = h5py.string_dtype(encoding='utf-8')
         id_dset = hf.create_dataset('customer_ids', 
                                     shape=(total_samples,), 
@@ -290,11 +292,10 @@ def save_train_embeddings(args, train_test='train'):
 
         print("Datasets created. Starting loop...")
         
-        global_idx = 0 # 全局写入指针
+        global_idx = 0 
         
         bar = tqdm(dataloader)
         for data in bar:
-            # 这里的 idxs 是当前 batch 的 customer_id 列表
             batch_ids = data['batch_idx'] 
             current_batch_size = len(batch_ids)
             
@@ -316,8 +317,6 @@ def save_train_embeddings(args, train_test='train'):
             
             embeddings_np = embeddings_batch.detach().cpu().numpy()
             
-            # [核心优化] 切片写入
-            # 直接将内存块写入硬盘的连续空间，速度最快
             emb_dset[global_idx : global_idx + current_batch_size] = embeddings_np
             id_dset[global_idx : global_idx + current_batch_size] = [str(x) for x in batch_ids]
             
