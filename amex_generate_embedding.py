@@ -82,14 +82,20 @@ class GenPromptEmb(nn.Module):
             print(f"Error loading tokenizer: {e}")
             raise e
             
+        # --- [新增] v5 稳健的 Tokenizer Padding 策略 ---
         if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+            if self.tokenizer.eos_token is not None:
+                self.tokenizer.pad_token = self.tokenizer.eos_token
+            else:
+                self.tokenizer.add_special_tokens({'pad_token': '[PAD]'})
         
+        # --- [新增] v5 Llama支持与负数异常值拦截 ---
         if hasattr(self.tokenizer, 'model_max_length'):
             self.max_len = self.tokenizer.model_max_length
-            if self.max_len > 100000: 
+            if self.max_len > 100000 or self.max_len < 0: 
                 if "gpt-neo" in model_name: self.max_len = 2048
                 elif "qwen" in model_name.lower(): self.max_len = 8192 
+                elif "llama" in model_name.lower(): self.max_len = 4096
                 else: self.max_len = 1024
         else:
             self.max_len = 1024
