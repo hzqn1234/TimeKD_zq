@@ -168,7 +168,7 @@ class Criterion:
     def __init__(self):
         self.feature_loss = 'smooth_l1'  
         self.fcst_loss = 'bce'
-        self.recon_loss = 'smooth_l1'
+        self.recon_loss = 'bce'
         self.att_loss = 'smooth_l1'   
         self.fcst_w    = args.fcst_w
         self.recon_w   = args.recon_w
