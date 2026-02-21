@@ -35,7 +35,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=4, help="batch size")
     parser.add_argument("--lrate", type=float, default=1e-5, help="learning rate")
     parser.add_argument("--dropout_n", type=float, default=0.2, help="dropout rate of neural network layers")
-    parser.add_argument("--d_llm", type=int, default=768, help="hidden dimensions")
+    parser.add_argument("--d_llm", type=int, default=896, help="hidden dimensions")
     parser.add_argument("--e_layer", type=int, default=1, help="layers of transformer encoder")
     parser.add_argument("--head", type=int, default=8, help="heads of attention")
     parser.add_argument("--model_name", type=str, default="gpt2", help="llm")
@@ -206,7 +206,7 @@ class trainer:
         print("The number of parameters: {}".format(self.model.param_num()))
 
         self.optimizer = optim.AdamW(self.model.parameters(), lr=lrate, weight_decay=wdecay)
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=min(epochs, 100), eta_min=1e-8, verbose=True)
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=min(epochs, 100), eta_min=1e-8)
 
     def train(self, data):
         self.model.train()
@@ -545,10 +545,10 @@ def create_log_df():
     return log_df
 
 def save_log(log_type='train', log_df=None):
-    if not os.path.exists(f'./experiment_log_{log_type}.csv'):
-        log_df.to_csv(f'./experiment_log_{log_type}.csv', index=False)
+    if not os.path.exists(f'./logs/experiment_log/experiment_log_{log_type}.csv'):
+        log_df.to_csv(f'./logs/experiment_log/experiment_log_{log_type}.csv', index=False)
     else:
-        log_df.to_csv(f'./experiment_log_{log_type}.csv', index=False, header=None, mode='a') 
+        log_df.to_csv(f'./logs/experiment_log/experiment_log_{log_type}.csv', index=False, header=None, mode='a') 
     return log_df
 
 if __name__ == "__main__":
