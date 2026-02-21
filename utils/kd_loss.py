@@ -23,6 +23,7 @@ class KDLoss(nn.Module):
         self.feature_w = feature_w
         self.recon_w = recon_w
         self.att_w = att_w
+        self.distill_w = 1
 
         self.feature_loss = loss_dict[feature_loss]
         self.fcst_loss = loss_dict[fcst_loss]
@@ -50,11 +51,15 @@ class KDLoss(nn.Module):
         fcst_loss = self.fcst_loss(ts_out, real)
         recon_loss = self.recon_loss(prompt_out, real)
         # att_loss = self.att_loss(ts_att_last, prompt_att_last)
+        
+        # 3. NEW: Student learns from Teacher's predictions (Soft targets)
+        # We detach prompt_out so gradients don't flow backward into the teacher here
+        distill_loss = nn.MSELoss()(ts_out, prompt_out.detach())
 
         # print(f'shapes: feature_loss:{feature_loss.shape},fcst_loss:{fcst_loss.shape},recon_loss:{recon_loss.shape},att_loss:{att_loss.shape}')
         # print(f'feature_loss:{feature_loss},fcst_loss:{fcst_loss},recon_loss:{recon_loss},att_loss:{att_loss}')
 
-        total_loss = self.fcst_w * fcst_loss + self.feature_w * feature_loss + self.recon_w * recon_loss
+        total_loss = self.fcst_w * fcst_loss + self.feature_w * feature_loss + self.recon_w * recon_loss + self.distill_w * distill_loss
         # total_loss = self.fcst_w * fcst_loss + (self.feature_w * feature_loss + self.recon_w * recon_loss + self.att_w * att_loss) * 0
         # total_loss = self.fcst_w * fcst_loss + self.feature_w * feature_loss + self.recon_w * recon_loss + self.att_w * att_loss
         # total_loss = self.fcst_w * fcst_loss + self.feature_w * feature_loss + self.recon_w * recon_loss
