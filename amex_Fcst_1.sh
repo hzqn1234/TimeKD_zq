@@ -1,13 +1,5 @@
 #!/bin/sh
 
-#SBATCH -o gpu-job-train-1.output
-#SBATCH -p PA100q
-#SBATCH --gpus-per-node=1
-
-#SBATCH -n 1
-#SBATCH -c 16
-#SBATCH -w node02
-
 # for lr in 1e-3 1e-4 1e-5 ## 2e-3 2e-4 2e-5
 for lr in 1e-3
 do
@@ -32,8 +24,9 @@ do
                                         --fcst_w 1\
                                         --recon_w 0.5\
                                         --att_w 0.01\
-                                        --emb_version "v3"\
-                                        --remark "test CAI student + emb teacher, emb_v3, feature + forecast + recon loss"\
+                                        --emb_version "v4"\
+                                        --d_llm 896 \
+                                        --remark "emb_v4"\
                                         --epochs 20 
     done
 done

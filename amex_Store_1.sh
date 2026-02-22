@@ -6,7 +6,7 @@ GPUS="0 1"
 
 # Define parameters as variables so they can be reused for the path
 DATA_TYPE="original"
-SAMPLING="1pct"
+SAMPLING="100pct"
 EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/emb_04"
 
 # === NEW CLEANUP LOGIC ===
@@ -31,7 +31,7 @@ for GPU_ID in $GPUS; do
     CUDA_VISIBLE_DEVICES=$GPU_ID python -u amex_store_emb.py \
             --num_nodes 223 \
             --data_type "$DATA_TYPE" \
-            --batch_size 4 \
+            --batch_size 2 \
             --num_workers 8 \
             --model_name "Qwen/Qwen2.5-0.5B" \
             --d_model 896 \
