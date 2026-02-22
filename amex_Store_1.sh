@@ -1,17 +1,8 @@
 #!/bin/sh
 
-#### SBATCH -o gpu-job-%j.output
-#SBATCH -o gpu-job-store-emb-1.output
-#SBATCH -p NA100q
-# SBATCH --gres=gpu:1 
-
-#SBATCH -n 1
-#SBATCH -c 8
-#SBATCH -w node01
-
 # Define the specific GPUs you want to use as a space-separated string (NOT an array).
 # You can change this to GPUS="0" to run on a single GPU, or GPUS="0 1 2" for multiple.
-GPUS="3 4" 
+GPUS="0 1" 
 
 # Define parameters as variables so they can be reused for the path
 DATA_TYPE="original"
