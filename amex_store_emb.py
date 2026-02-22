@@ -31,23 +31,63 @@ class Amex_Dataset:
         self.max_len = max_len
         
         print(f"Dataset initialized with Hard Max Length: {self.max_len}")
-        print("Pre-computing static token IDs...")
+        print("Pre-computing static token IDs & Feature Metadata...")
         
-        # --- 缓存优化 ---
-        intro_text = "Credit risk analysis. Predict default: "
+        # --- 缓存优化 & [新增] v5 完整的角色扮演 Prompt ---
+        intro_text = (
+            "Credit Risk Expert Analysis.\n"
+            "Task: Assess default probability based on monthly financial statements.\n"
+            "Categories: Delinquency(D), Spend(S), Payment(P), Balance(B), Risk(R).\n"
+            "Data Report:\n"
+        )
         self.id_gt_intro = self.tokenizer.encode(intro_text, add_special_tokens=False)
         self.id_hd_intro = self.tokenizer.encode(intro_text, add_special_tokens=False)
-        self.id_mid = self.tokenizer.encode(" Feats: ", add_special_tokens=False)
-        self.id_suffix_gt = self.tokenizer.encode(". Label: ", add_special_tokens=False)
-        self.id_suffix_hd = self.tokenizer.encode(". Risk prob:", add_special_tokens=False)
+        
+        self.id_mid = self.tokenizer.encode("\n", add_special_tokens=False)
+        self.id_suffix_gt = self.tokenizer.encode("\nGround Truth Label (1=Default): ", add_special_tokens=False)
+        
+        # [新增] v5 的推理引导后缀
+        suffix_hd_text = (
+            "\nBased on the data profile shown above, "
+            "analyze the repayment behavior. Predicted Default Risk:"
+        )
+        self.id_suffix_hd = self.tokenizer.encode(suffix_hd_text, add_special_tokens=False)
         
         unique_dates = self.df_series['S_2'].unique()
         self.date_cache = {}
         for d in unique_dates:
-            self.date_cache[d] = self.tokenizer.encode(f"Dt:{str(d)}", add_special_tokens=False)
-        self.pad_date_id = self.tokenizer.encode("PAD", add_special_tokens=False)
+            self.date_cache[d] = self.tokenizer.encode(f"Time: {str(d)}", add_special_tokens=False)
+        self.pad_date_id = self.tokenizer.encode("Padding", add_special_tokens=False)
 
         self.base_overhead = len(self.id_gt_intro) + len(self.id_mid) + len(self.id_suffix_gt) + 5
+        
+        # --- v5 的特征语义化映射逻辑 ---
+        PREFIX_MAP = {
+            'D': 'Delinquency', 'S': 'Spend', 'P': 'Payment', 
+            'B': 'Balance', 'R': 'Risk'
+        }
+        self.feature_meta = []
+        if self.feature_names is not None:
+            for name in self.feature_names:
+                if str(name).startswith('oneHot_'):
+                    try:
+                        core = name[7:] 
+                        last_underscore = core.rfind('_')
+                        if last_underscore != -1:
+                            orig_feat = core[:last_underscore] 
+                            cat_val = core[last_underscore+1:] 
+                            prefix = orig_feat.split('_')[0]
+                            category = PREFIX_MAP.get(prefix, 'Other')
+                            self.feature_meta.append({'type': 'onehot', 'name': name, 'orig_name': orig_feat, 'cat_val': cat_val, 'semantic_cat': category})
+                        else:
+                            self.feature_meta.append({'type': 'numeric', 'name': name, 'semantic_cat': 'Other'})
+                    except:
+                        self.feature_meta.append({'type': 'numeric', 'name': name, 'semantic_cat': 'Other'})
+                else:
+                    prefix = str(name).split('_')[0] if '_' in str(name) else 'O'
+                    category = PREFIX_MAP.get(prefix, 'Other')
+                    self.feature_meta.append({'type': 'numeric', 'name': name, 'semantic_cat': category})
+                    
         print("Dataset initialization complete.")
 
     def __len__(self):
@@ -64,9 +104,39 @@ class Amex_Dataset:
         reserved_tokens = self.base_overhead + len(date_ids) + len(y_label_ids)
         available_tokens = self.max_len - reserved_tokens
         
-        # 极速构建策略：仅数值
-        vals_list = [f"{v:.2f}" for v in feats_vals]
-        vals_str = " ".join(vals_list)
+        # --- v5 的区块化拼接逻辑 (Hierarchical Grouping) ---
+        if self.feature_names is not None and len(self.feature_names) == len(feats_vals):
+            grouped_lines = { 'Delinquency': [], 'Spend': [], 'Payment': [], 'Balance': [], 'Risk': [], 'Other': [] }
+            
+            for meta, val in zip(self.feature_meta, feats_vals):
+                cat_key = meta['semantic_cat']
+                if cat_key not in grouped_lines: cat_key = 'Other'
+                
+                line_str = ""
+                if meta['type'] == 'onehot':
+                    if val > 0.5:
+                        line_str = f"{meta['orig_name']}: Type {meta['cat_val']}"
+                else:
+                    line_str = f"{meta['name']}: {val:.2f}"
+
+                if line_str:
+                    grouped_lines[cat_key].append(line_str)
+            
+            sections = []
+            order = ['Delinquency', 'Balance', 'Payment', 'Spend', 'Risk', 'Other']
+            for key in order:
+                lines = grouped_lines.get(key, [])
+                if lines:
+                    section_content = ", ".join(lines)
+                    sections.append(f"[{key}] {section_content}")
+            
+            vals_str = "\n".join(sections)
+        else:
+            # 极速构建策略的回退方案
+            vals_list = [f"{v:.2f}" for v in feats_vals]
+            vals_str = " ".join(vals_list)
+        # -----------------------------------------------------------
+
         vals_ids = self.tokenizer.encode(vals_str, add_special_tokens=False)
         
         if len(vals_ids) > available_tokens:
@@ -204,7 +274,7 @@ def parse_args():
     return parser.parse_args()
 
 def save_train_embeddings(args, train_test='train'):
-    print(f'save_train_embeddings - V6 (Pre-allocated Huge Array + Bulletproof OS Chunking)')
+    print(f'save_train_embeddings - V5 (Pre-allocated Huge Array + Bulletproof OS Chunking)')
     
     input_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/'
     series = pd.read_feather(f'{input_path}/df_nn_series_{train_test}.feather')
@@ -267,7 +337,7 @@ def save_train_embeddings(args, train_test='train'):
         prefetch_factor=4
     )
 
-    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_04/'
+    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_05/'
     os.makedirs(emb_path, exist_ok=True)
     
     output_h5_path = os.path.join(emb_path, f"{train_test}_embeddings_chunk_{args.chunk_id}.h5")

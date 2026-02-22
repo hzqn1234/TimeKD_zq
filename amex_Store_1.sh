@@ -11,12 +11,12 @@
 
 # Define the specific GPUs you want to use as a space-separated string (NOT an array).
 # You can change this to GPUS="0" to run on a single GPU, or GPUS="0 1 2" for multiple.
-GPUS="3 4" 
+GPUS="2 3 4 5 6" 
 
 # Define parameters as variables so they can be reused for the path
 DATA_TYPE="original"
-SAMPLING="1pct"
-EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/emb_04"
+SAMPLING="100pct"
+EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/emb_05"
 
 # === NEW CLEANUP LOGIC ===
 echo "Ensuring directory exists and clearing previous embedding files in ${EMB_DIR}..."
@@ -40,7 +40,7 @@ for GPU_ID in $GPUS; do
     CUDA_VISIBLE_DEVICES=$GPU_ID python -u amex_store_emb.py \
             --num_nodes 223 \
             --data_type "$DATA_TYPE" \
-            --batch_size 4 \
+            --batch_size 2 \
             --num_workers 8 \
             --model_name "Qwen/Qwen2.5-0.5B" \
             --d_model 896 \
