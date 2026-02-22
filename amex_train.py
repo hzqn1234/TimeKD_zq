@@ -252,8 +252,12 @@ def seed_it(seed):
 args = parse_args()
 INPUT_PATH  = f'../../000_data/amex/{args.data_type}_{args.sampling}'
 
-# [V6] 统一使用 emb_04 目录
-emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_04/'
+if args.emb_version == 'v4':
+    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_04/'
+elif args.emb_version == 'v5':
+    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_05/'
+else:
+    emb_path = None
 
 print(f'INPUT_PATH: {INPUT_PATH}')
 print(f'emb_path: {emb_path}')
