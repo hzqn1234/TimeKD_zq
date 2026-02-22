@@ -274,7 +274,7 @@ def parse_args():
     return parser.parse_args()
 
 def save_train_embeddings(args, train_test='train'):
-    print(f'save_train_embeddings - V6 (Pre-allocated Huge Array + Bulletproof OS Chunking)')
+    print(f'save_train_embeddings - V5 (Pre-allocated Huge Array + Bulletproof OS Chunking)')
     
     input_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/'
     series = pd.read_feather(f'{input_path}/df_nn_series_{train_test}.feather')
@@ -337,7 +337,7 @@ def save_train_embeddings(args, train_test='train'):
         prefetch_factor=4
     )
 
-    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_04/'
+    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_05/'
     os.makedirs(emb_path, exist_ok=True)
     
     output_h5_path = os.path.join(emb_path, f"{train_test}_embeddings_chunk_{args.chunk_id}.h5")

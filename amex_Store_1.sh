@@ -15,7 +15,53 @@ GPUS="2 4 5"
 
 # Define parameters as variables so they can be reused for the path
 DATA_TYPE="original"
-SAMPLING="1pct"
+SAMPLING="10pct"
+EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/emb_05"
+
+# === NEW CLEANUP LOGIC ===
+echo "Ensuring directory exists and clearing previous embedding files in ${EMB_DIR}..."
+mkdir -p "$EMB_DIR"
+rm -f "$EMB_DIR"/*.h5
+# =========================
+
+# Calculate the total number of chunks by counting the items in the GPUS string
+TOTAL_CHUNKS=0
+for gpu in $GPUS; do
+    TOTAL_CHUNKS=$((TOTAL_CHUNKS + 1))
+done
+
+echo "Running $TOTAL_CHUNKS chunks across GPUs: $GPUS"
+
+# OS-Level Parallelism: Launch independent processes simultaneously
+i=0
+for GPU_ID in $GPUS; do
+    echo "Starting chunk $i on GPU $GPU_ID..."
+    
+    CUDA_VISIBLE_DEVICES=$GPU_ID python -u amex_store_emb.py \
+            --num_nodes 223 \
+            --data_type "$DATA_TYPE" \
+            --batch_size 2 \
+            --num_workers 8 \
+            --model_name "Qwen/Qwen2.5-0.5B" \
+            --d_model 896 \
+            --max_token_len 4096 \
+            --sampling "$SAMPLING" \
+            --chunk_id $i \
+            --total_chunks $TOTAL_CHUNKS > store_emb_1_chunk_${i}.log 2>&1 &
+            
+    # Increment the chunk ID index
+    i=$((i + 1))
+done
+
+# Wait for all background processes to finish
+wait
+
+echo "All $TOTAL_CHUNKS train embedding chunks finished successfully!"
+
+
+# Define parameters as variables so they can be reused for the path
+DATA_TYPE="original"
+SAMPLING="100pct"
 EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/emb_05"
 
 # === NEW CLEANUP LOGIC ===
