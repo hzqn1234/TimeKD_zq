@@ -6,6 +6,9 @@ import time
 import os
 import random
 import glob
+
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+
 from torch.utils.data import DataLoader
 from model.CAI_model import Amodel
 from utils.kd_loss import KDLoss
