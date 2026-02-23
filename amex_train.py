@@ -260,8 +260,12 @@ def seed_it(seed):
 args = parse_args()
 INPUT_PATH  = f'../../000_data/amex/{args.data_type}_{args.sampling}'
 
-# [V6] 统一使用 emb_04 目录
-emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_04/'
+if args.emb_version == 'v4':
+    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_04/'
+elif args.emb_version == 'v5':
+    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_05/'
+else:
+    emb_path = None
 
 print(f'INPUT_PATH: {INPUT_PATH}')
 print(f'emb_path: {emb_path}')
@@ -553,11 +557,17 @@ def create_log_df():
     return log_df
 
 def save_log(log_type='train', log_df=None):
-    if not os.path.exists(f'./logs/experiment_log/experiment_log_{log_type}.csv'):
-        log_df.to_csv(f'./logs/experiment_log/experiment_log_{log_type}.csv', index=False)
+    log_dir = './logs/experiment_log'
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+    
+    file_path = f'{log_dir}/experiment_log_{log_type}.csv'    
+    if not os.path.exists(file_path):
+        log_df.to_csv(file_path, index=False)
     else:
-        log_df.to_csv(f'./logs/experiment_log/experiment_log_{log_type}.csv', index=False, header=None, mode='a') 
+        log_df.to_csv(file_path, index=False, header=None, mode='a') 
     return log_df
+
 
 if __name__ == "__main__":
     log_df = None
