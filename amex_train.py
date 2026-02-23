@@ -6,6 +6,9 @@ import time
 import os
 import random
 import glob
+
+os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+
 from torch.utils.data import DataLoader
 from model.CAI_model import Amodel
 from utils.kd_loss import KDLoss
@@ -117,10 +120,15 @@ class Amex_Dataset:
             
             fpath, row_idx = mapping
 
-            # 2. 从对应的分块中读取
-            with h5py.File(fpath, 'r') as hf:
-                emb_data = hf['embeddings'][row_idx]
-                emb_tensor = torch.from_numpy(emb_data)
+            # 2. Lazy load and cache HDF5 file handlers per worker process
+            if not hasattr(self, 'h5_handlers'):
+                self.h5_handlers = {}
+            if fpath not in self.h5_handlers:
+                self.h5_handlers[fpath] = h5py.File(fpath, 'r')
+
+            # 3. Read from the cached handler
+            emb_data = self.h5_handlers[fpath]['embeddings'][row_idx]
+            emb_tensor = torch.from_numpy(emb_data)
 
             label = self.df_y.loc[idx, [self.label_name]].values
             return {
