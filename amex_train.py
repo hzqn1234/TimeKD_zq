@@ -549,11 +549,17 @@ def create_log_df():
     return log_df
 
 def save_log(log_type='train', log_df=None):
-    if not os.path.exists(f'./logs/experiment_log/experiment_log_{log_type}.csv'):
-        log_df.to_csv(f'./logs/experiment_log/experiment_log_{log_type}.csv', index=False)
+    log_dir = './logs/experiment_log'
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir, exist_ok=True)
+    
+    file_path = f'{log_dir}/experiment_log_{log_type}.csv'    
+    if not os.path.exists(file_path):
+        log_df.to_csv(file_path, index=False)
     else:
-        log_df.to_csv(f'./logs/experiment_log/experiment_log_{log_type}.csv', index=False, header=None, mode='a') 
+        log_df.to_csv(file_path, index=False, header=None, mode='a') 
     return log_df
+
 
 if __name__ == "__main__":
     log_df = None
