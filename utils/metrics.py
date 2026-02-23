@@ -48,7 +48,12 @@ def amex_metric_mod(y_true, y_pred):
     return 0.5 * (gini[1]/gini[0] + top_four)
 
 def metric(preds,labels):
-    return amex_metric_mod(labels.cpu(),preds.cpu()), roc_auc_score(labels.cpu(),preds.cpu())
+    labels_np = labels.detach().cpu().numpy()
+    preds_np = preds.detach().cpu().numpy()
+    return amex_metric_mod(labels_np, preds_np), roc_auc_score(labels_np, preds_np)
+
+# def metric(preds,labels):
+#     return amex_metric_mod(labels.cpu(),preds.cpu()), roc_auc_score(labels.cpu(),preds.cpu())
 
 # def metric(pred, true):
     # mse = MSE(pred, true).item() # loss function
