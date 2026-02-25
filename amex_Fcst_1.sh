@@ -6,7 +6,7 @@
 
 #SBATCH -n 1
 #SBATCH -c 8
-#SBATCH -w node02
+#SBATCH -w node05
 
 # for lr in 1e-3 1e-4 1e-5 ## 2e-3 2e-4 2e-5
 for lr in 1e-4 1e-5
@@ -34,7 +34,7 @@ do
                                         --recon_w 0.5\
                                         --att_w 0.01\
                                         --emb_version "v5"\
-                                        --remark "emb v5, with distill loss"\
+                                        --remark "emb v5, with distill loss, remove feature loss, server 25"\
                                         --epochs 20 
     done
 done
