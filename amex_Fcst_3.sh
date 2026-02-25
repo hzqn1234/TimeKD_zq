@@ -5,18 +5,20 @@
 #SBATCH --gpus-per-node=1
 
 #SBATCH -n 1
-#SBATCH -c 16
-#SBATCH -w node03
+#SBATCH -c 8
+#SBATCH -w node05
 
-for lr in 1e-3 1e-4 1e-5 2e-3 2e-4 2e-5
+# for lr in 1e-3 1e-4 1e-5 ## 2e-3 2e-4 2e-5
+for lr in 1e-4 1e-5
 do
     echo "lr: "$lr
     for seed in 42
     do 
         echo "seed: "$seed
-        CUDA_VISIBLE_DEVICES=2 python amex_train.py \
+        CUDA_VISIBLE_DEVICES=2 \
+        python amex_train.py \
                                         --lrate $lr \
-                                        --sampling "100pct" \
+                                        --sampling "1pct" \
                                         --data_type "original" \
                                         --num_nodes 223 \
                                         --es_patience 3 \
@@ -26,14 +28,13 @@ do
                                         --predict \
                                         --submit \
                                         --batch_size 128 \
-                                        --num_workers 16 \
+                                        --num_workers 8 \
                                         --feature_w 0.01\
                                         --fcst_w 1\
                                         --recon_w 0.5\
                                         --att_w 0.01\
-                                        --emb_version "v2"\
-                                        --remark "only forecast loss, test Amodel_CAI"\
+                                        --emb_version "v5"\
+                                        --remark "emb v5, with distill loss, remove feature loss, server 25"\
                                         --epochs 20 
     done
 done
-
