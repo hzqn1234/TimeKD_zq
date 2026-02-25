@@ -30,7 +30,7 @@ class Amex_Dataset:
         self.tokenizer = tokenizer
         self.feature_names = feature_names
         self.max_len = max_len
-        self.allow_truncate = allow_truncate # [新增] 接收截断控制参数
+        self.allow_truncate = allow_truncate 
         
         print(f"Dataset initialized with Hard Max Length: {self.max_len}")
         print(f"Allow Truncate Strategy: {self.allow_truncate}")
@@ -145,10 +145,15 @@ class Amex_Dataset:
 
         vals_ids = self.tokenizer.encode(vals_str, add_special_tokens=False)
         
+        # [新增] 计算未截断前的真实最大 Token 长度
+        raw_gt_len = len(self.id_gt_intro) + len(date_ids) + len(self.id_mid) + len(vals_ids) + len(self.id_suffix_gt) + len(y_label_ids)
+        raw_hd_len = len(self.id_hd_intro) + len(date_ids) + len(self.id_mid) + len(vals_ids) + len(self.id_suffix_hd)
+        raw_max_len = max(raw_gt_len, raw_hd_len)
+        
         # [修改] 强制截断丢失的控制逻辑
         if len(vals_ids) > available_tokens:
             if self.allow_truncate:
-                warnings.warn(f"\n[Warning] Token limit exceeded! Required: {len(vals_ids) + reserved_tokens}, Max: {self.max_len}. "
+                warnings.warn(f"\n[Warning] Token limit exceeded! Required: {raw_max_len}, Max: {self.max_len}. "
                               f"Truncating features to fit. Tail information will be lost.")
                 vals_ids = vals_ids[:available_tokens]
             else:
@@ -160,7 +165,7 @@ class Amex_Dataset:
         hd_seq = (self.id_hd_intro + date_ids + self.id_mid + 
                   vals_ids + self.id_suffix_hd)
         
-        return gt_seq, hd_seq
+        return gt_seq, hd_seq, raw_max_len # [新增] 返回真实的 token 长度
 
     def __getitem__(self, index):
         i1, i2, idx = self.uidxs[index]
@@ -176,16 +181,20 @@ class Amex_Dataset:
         
         gt_ids_list = []
         hd_ids_list = []
+        sample_raw_max = 0 # [新增] 记录本样本13个时间步中最长的 raw_len
         
         seq_len = 13
         valid_len = len(time_ref)
         
         for t in range(seq_len):
             if t < valid_len:
-                gt_seq, hd_seq = self.process_single_step(time_ref[t], series[t], label, True)
+                gt_seq, hd_seq, raw_len = self.process_single_step(time_ref[t], series[t], label, True)
             else:
-                gt_seq, hd_seq = self.process_single_step(None, np.zeros(series.shape[1]), label, False)
+                gt_seq, hd_seq, raw_len = self.process_single_step(None, np.zeros(series.shape[1]), label, False)
             
+            if raw_len > sample_raw_max:
+                sample_raw_max = raw_len
+                
             gt_ids_list.append(torch.tensor(gt_seq, dtype=torch.long))
             hd_ids_list.append(torch.tensor(hd_seq, dtype=torch.long))
 
@@ -220,15 +229,19 @@ class Amex_Dataset:
             'gt_lens': gt_lens,
             'hd_input_ids': hd_input_ids,
             'hd_mask': hd_mask,
-            'hd_lens': hd_lens
+            'hd_lens': hd_lens,
+            'sample_raw_max': sample_raw_max # [新增]
         }
 
     def collate_fn(self, batch):
         batch_idx = np.array([sample['idx'] for sample in batch])
         
         batch_max_len = 0
+        batch_raw_max = 0 # [新增]
         for sample in batch:
             batch_max_len = max(batch_max_len, sample['gt_input_ids'].shape[1], sample['hd_input_ids'].shape[1])
+            if sample['sample_raw_max'] > batch_raw_max:
+                batch_raw_max = sample['sample_raw_max']
                 
         pad_id = self.tokenizer.pad_token_id
         batch_size = len(batch)
@@ -260,7 +273,8 @@ class Amex_Dataset:
             'gt_lens': final_gt_lens,
             'hd_input_ids': final_hd_ids,
             'hd_mask': final_hd_mask,
-            'hd_lens': final_hd_lens
+            'hd_lens': final_hd_lens,
+            'batch_raw_max': batch_raw_max # [新增]
         }
 
 def parse_args():
@@ -333,7 +347,6 @@ def save_train_embeddings(args, train_test='train'):
     
     effective_max_len = min(args.max_token_len, gen_prompt_emb.max_len)
     
-    # [修改] 实例化时传入 allow_truncate 状态
     dataset = Amex_Dataset(
         series, 
         series_idx, 
@@ -361,7 +374,9 @@ def save_train_embeddings(args, train_test='train'):
     output_h5_path = os.path.join(emb_path, f"{train_test}_embeddings_chunk_{args.chunk_id}.h5")
     print(f"Saving to: {output_h5_path}")
 
-    # [核心优化] 预分配大数组
+    # [新增] 全局跟踪最大原始 Token 长度
+    global_max_raw_len = 0 
+
     with h5py.File(output_h5_path, 'w') as hf:
         
         # Prevent HDF5 crash if total_samples < batch_size
@@ -384,6 +399,10 @@ def save_train_embeddings(args, train_test='train'):
         
         bar = tqdm(dataloader)
         for data in bar:
+            # [新增] 动态更新全局最大原始 Token 长度
+            if data['batch_raw_max'] > global_max_raw_len:
+                global_max_raw_len = data['batch_raw_max']
+                
             batch_ids = data['batch_idx'] 
             current_batch_size = len(batch_ids)
             
@@ -410,7 +429,20 @@ def save_train_embeddings(args, train_test='train'):
             
             global_idx += current_batch_size
 
-    print("Done.")
+    print("\n" + "="*60)
+    print("🎉 Chunk Processing Done.")
+    print(f"📊 Maximum observed raw token length: {global_max_raw_len}")
+    print(f"⚙️ Current max_token_len limit: {effective_max_len}")
+    
+    if global_max_raw_len > effective_max_len:
+        if args.allow_truncate == 1:
+            print(f"⚠️ [WARN] Truncation OCCURRED! Some features were discarded.")
+            print(f"💡 Suggestion: You may safely increase --max_token_len to {global_max_raw_len} in your script if VRAM allows.")
+        else:
+            print(f"❌ [ERROR] Token length exceeded limit and allow_truncate is 0! This may have caused unexpected behavior.")
+    else:
+        print(f"✅ [OK] No truncation occurred. Token length is well within safe limits.")
+    print("="*60 + "\n")
     return 
 
 if __name__ == "__main__":

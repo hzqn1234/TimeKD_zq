@@ -3,15 +3,15 @@
 #### SBATCH -o gpu-job-%j.output
 #SBATCH -o gpu-job-store-emb-1.output
 #SBATCH -p PA100q
-# SBATCH --gres=gpu:1 
+# SBATCH --gres=gpu:2
 
 #SBATCH -n 1
-#SBATCH -c 8
-#SBATCH -w node02
+#SBATCH -c 4
+#SBATCH -w node05
 
 # Define the specific GPUs you want to use as a space-separated string (NOT an array).
 # You can change this to GPUS="0" to run on a single GPU, or GPUS="0 1 2" for multiple.
-GPUS="0 1 2 3 4" 
+GPUS="0 1 2" 
 
 # Define parameters as variables so they can be reused for the path
 DATA_TYPE="original"
@@ -37,7 +37,8 @@ i=0
 for GPU_ID in $GPUS; do
     echo "Starting chunk $i on GPU $GPU_ID..."
     
-    CUDA_VISIBLE_DEVICES=$GPU_ID python -u amex_store_emb.py \
+    CUDA_VISIBLE_DEVICES=$GPU_ID \
+    python -u amex_store_emb.py \
             --num_nodes 223 \
             --data_type "$DATA_TYPE" \
             --batch_size 1 \
