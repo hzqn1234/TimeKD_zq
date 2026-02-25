@@ -7,6 +7,7 @@ import time
 import math
 import h5py
 import argparse
+import warnings # [新增] 导入 warnings 模块用于触发截断警告
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
@@ -19,7 +20,7 @@ from datetime import datetime
 
 
 class Amex_Dataset:
-    def __init__(self, df_series, uidxs, tokenizer, feature_names, max_len=1024, df_y=None, label_name='target', id_name='customer_ID'):
+    def __init__(self, df_series, uidxs, tokenizer, feature_names, max_len=1024, df_y=None, label_name='target', id_name='customer_ID', allow_truncate=False):
         self.df_series = df_series
         self.df_y = df_y
         self.uidxs = uidxs
@@ -29,11 +30,13 @@ class Amex_Dataset:
         self.tokenizer = tokenizer
         self.feature_names = feature_names
         self.max_len = max_len
+        self.allow_truncate = allow_truncate # [新增] 接收截断控制参数
         
         print(f"Dataset initialized with Hard Max Length: {self.max_len}")
+        print(f"Allow Truncate Strategy: {self.allow_truncate}")
         print("Pre-computing static token IDs & Feature Metadata...")
         
-        # --- 缓存优化 & [新增] v5 完整的角色扮演 Prompt ---
+        # --- 缓存优化 & 完整的角色扮演 Prompt ---
         intro_text = (
             "Credit Risk Expert Analysis.\n"
             "Task: Assess default probability based on monthly financial statements.\n"
@@ -46,7 +49,7 @@ class Amex_Dataset:
         self.id_mid = self.tokenizer.encode("\n", add_special_tokens=False)
         self.id_suffix_gt = self.tokenizer.encode("\nGround Truth Label (1=Default): ", add_special_tokens=False)
         
-        # [新增] v5 的推理引导后缀
+        # 推理引导后缀
         suffix_hd_text = (
             "\nBased on the data profile shown above, "
             "analyze the repayment behavior. Predicted Default Risk:"
@@ -61,7 +64,7 @@ class Amex_Dataset:
 
         self.base_overhead = len(self.id_gt_intro) + len(self.id_mid) + len(self.id_suffix_gt) + 5
         
-        # --- v5 的特征语义化映射逻辑 ---
+        # --- 特征语义化映射逻辑 ---
         PREFIX_MAP = {
             'D': 'Delinquency', 'S': 'Spend', 'P': 'Payment', 
             'B': 'Balance', 'R': 'Risk'
@@ -113,10 +116,13 @@ class Amex_Dataset:
                 if cat_key not in grouped_lines: cat_key = 'Other'
                 
                 line_str = ""
+                # [修改] 优化后的逻辑：只输出激活的类别，极其节省 Token，且符合自然语言直觉
                 if meta['type'] == 'onehot':
                     if val > 0.5:
+                        # 只在值为 1 时输出，例如 "D_68: Type 1"
                         line_str = f"{meta['orig_name']}: Type {meta['cat_val']}"
                 else:
+                    # 连续特征的 0 会在这里被完美保留，例如 "Spend_1: 0.00"
                     line_str = f"{meta['name']}: {val:.2f}"
 
                 if line_str:
@@ -139,8 +145,15 @@ class Amex_Dataset:
 
         vals_ids = self.tokenizer.encode(vals_str, add_special_tokens=False)
         
+        # [修改] 强制截断丢失的控制逻辑
         if len(vals_ids) > available_tokens:
-            vals_ids = vals_ids[:available_tokens]
+            if self.allow_truncate:
+                warnings.warn(f"\n[Warning] Token limit exceeded! Required: {len(vals_ids) + reserved_tokens}, Max: {self.max_len}. "
+                              f"Truncating features to fit. Tail information will be lost.")
+                vals_ids = vals_ids[:available_tokens]
+            else:
+                # 不允许截断，保留完整长度 (可能会导致后续 forward_tokenized 报 OOM 或索引越界)
+                pass
 
         gt_seq = (self.id_gt_intro + date_ids + self.id_mid + 
                   vals_ids + self.id_suffix_gt + y_label_ids)
@@ -266,6 +279,9 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=64)
     # [优化] 限制 Token 长度防止 OOM
     parser.add_argument("--max_token_len", type=int, default=2048) 
+    
+    # [新增] 截断控制参数
+    parser.add_argument("--allow_truncate", type=int, default=0, help="0: 不允许截断 (可能OOM), 1: 允许截断并在发生时发出警告")
 
     # [CHUNK LOGIC]
     parser.add_argument("--chunk_id", type=int, default=0)
@@ -317,13 +333,15 @@ def save_train_embeddings(args, train_test='train'):
     
     effective_max_len = min(args.max_token_len, gen_prompt_emb.max_len)
     
+    # [修改] 实例化时传入 allow_truncate 状态
     dataset = Amex_Dataset(
         series, 
         series_idx, 
         tokenizer=gen_prompt_emb.tokenizer,
         feature_names=dynamic_feature_names,
         max_len=effective_max_len,
-        df_y=y
+        df_y=y,
+        allow_truncate=(args.allow_truncate == 1)
     )
     
     dataloader = DataLoader(
@@ -337,7 +355,7 @@ def save_train_embeddings(args, train_test='train'):
         prefetch_factor=4
     )
 
-    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_05/'
+    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_06/'
     os.makedirs(emb_path, exist_ok=True)
     
     output_h5_path = os.path.join(emb_path, f"{train_test}_embeddings_chunk_{args.chunk_id}.h5")
