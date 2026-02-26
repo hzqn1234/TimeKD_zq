@@ -96,7 +96,7 @@ class Amex_Dataset:
     def __len__(self):
         return (len(self.uidxs))
 
-    def process_single_step(self, time_val, feats_vals, y_val, valid_step):
+    def process_single_step(self, time_val, feats_vals, prev_vals, y_val, valid_step):
         if valid_step:
             date_ids = self.date_cache.get(time_val, self.pad_date_id)
         else:
@@ -111,7 +111,7 @@ class Amex_Dataset:
         if self.feature_names is not None and len(self.feature_names) == len(feats_vals):
             grouped_lines = { 'Delinquency': [], 'Spend': [], 'Payment': [], 'Balance': [], 'Risk': [], 'Other': [] }
             
-            for meta, val in zip(self.feature_meta, feats_vals):
+            for idx, (meta, val) in enumerate(zip(self.feature_meta, feats_vals)):
                 cat_key = meta['semantic_cat']
                 if cat_key not in grouped_lines: cat_key = 'Other'
                 
@@ -122,8 +122,20 @@ class Amex_Dataset:
                         # 只在值为 1 时输出，例如 "D_68: Type 1"
                         line_str = f"{meta['orig_name']}: Type {meta['cat_val']}"
                 else:
-                    # 连续特征的 0 会在这里被完美保留，例如 "Spend_1: 0.00"
-                    line_str = f"{meta['name']}: {val:.2f}"
+                    # 连续特征的趋势计算处理
+                    val_str = f"{val:.2f}"
+                    trend_str = ""
+                    
+                    if prev_vals is not None:
+                        prev = prev_vals[idx]
+                        diff = val - prev
+                        # 启发式规则：只关注大于 0.01 的有意义变化
+                        if abs(diff) > 0.01:
+                            direction = "↑" if diff > 0 else "↓"
+                            trend_str = f" ({direction}{abs(diff):.2f})"
+                    
+                    # 拼接结果，例如 "Spend_1: 0.00" 或 "Spend_1: 0.05 (↑0.05)"
+                    line_str = f"{meta['name']}: {val_str}{trend_str}"
 
                 if line_str:
                     grouped_lines[cat_key].append(line_str)
@@ -188,9 +200,12 @@ class Amex_Dataset:
         
         for t in range(seq_len):
             if t < valid_len:
-                gt_seq, hd_seq, raw_len = self.process_single_step(time_ref[t], series[t], label, True)
+                # 提取 t-1 时刻的特征用于计算趋势 (当 t=0 时没有上个月数据，传 None)
+                prev_vals = series[t-1] if t > 0 else None
+                gt_seq, hd_seq, raw_len = self.process_single_step(time_ref[t], series[t], prev_vals, label, True)
             else:
-                gt_seq, hd_seq, raw_len = self.process_single_step(None, np.zeros(series.shape[1]), label, False)
+                # 填充时刻，prev_vals 也传 None
+                gt_seq, hd_seq, raw_len = self.process_single_step(None, np.zeros(series.shape[1]), None, label, False)
             
             if raw_len > sample_raw_max:
                 sample_raw_max = raw_len

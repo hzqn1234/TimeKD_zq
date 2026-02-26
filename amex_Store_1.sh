@@ -3,19 +3,19 @@
 #### SBATCH -o gpu-job-%j.output
 #SBATCH -o gpu-job-store-emb-1.output
 #SBATCH -p PA100q
-# SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:3
 
 #SBATCH -n 1
 #SBATCH -c 4
-#SBATCH -w node05
+#SBATCH -w node02
 
 # Define the specific GPUs you want to use as a space-separated string (NOT an array).
 # You can change this to GPUS="0" to run on a single GPU, or GPUS="0 1 2" for multiple.
-GPUS="0 1 2" 
+GPUS="0 1 7" 
 
 # Define parameters as variables so they can be reused for the path
 DATA_TYPE="original"
-SAMPLING="1pct"
+SAMPLING="10pct"
 EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/emb_06"
 
 # === NEW CLEANUP LOGIC ===
@@ -45,7 +45,7 @@ for GPU_ID in $GPUS; do
             --num_workers 8 \
             --model_name "Qwen/Qwen2.5-0.5B" \
             --d_model 896 \
-            --max_token_len 1024 \
+            --max_token_len 2048 \
             --sampling "$SAMPLING" \
             --chunk_id $i \
             --total_chunks $TOTAL_CHUNKS \
@@ -61,3 +61,6 @@ done
 wait
 
 echo "All $TOTAL_CHUNKS train embedding chunks finished successfully!"
+
+
+
