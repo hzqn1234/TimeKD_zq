@@ -2,20 +2,20 @@
 
 #### SBATCH -o gpu-job-%j.output
 #SBATCH -o gpu-job-store-emb-2.output
-#SBATCH -p RTXA6Kq
-#SBATCH --gres=gpu:5
+#SBATCH -p PA10080q
+# SBATCH --gres=gpu:2
 
 #SBATCH -n 1
-#SBATCH -c 4
-#SBATCH -w node09
+#SBATCH -c 12
+#SBATCH -w node04
 
 # Define the specific GPUs you want to use as a space-separated string (NOT an array).
 # You can change this to GPUS="0" to run on a single GPU, or GPUS="0 1 2" for multiple.
-GPUS="0 1 2 3 4" 
+GPUS="0 1" 
 
 # Define parameters as variables so they can be reused for the path
 DATA_TYPE="original"
-SAMPLING="10pct"
+SAMPLING="100pct"
 EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/emb_06"
 
 # === NEW CLEANUP LOGIC ===
@@ -41,17 +41,17 @@ for GPU_ID in $GPUS; do
     python -u amex_store_emb.py \
             --num_nodes 223 \
             --data_type "$DATA_TYPE" \
-            --batch_size 1 \
-            --num_workers 8 \
+            --batch_size 16 \
+            --num_workers 4 \
             --model_name "Qwen/Qwen2.5-0.5B" \
             --d_model 896 \
-            --max_token_len 1024 \
+            --max_token_len 2048 \
             --sampling "$SAMPLING" \
             --chunk_id $i \
             --total_chunks $TOTAL_CHUNKS \
             --allow_truncate 0 \
-            --l_layers 8 \
-            > store_emb_1_chunk_${i}.log 2>&1 &
+            --l_layers 16 \
+            > store_emb_2_chunk_${i}.log 2>&1 &
             
     # Increment the chunk ID index
     i=$((i + 1))
@@ -61,4 +61,6 @@ done
 wait
 
 echo "All $TOTAL_CHUNKS train embedding chunks finished successfully!"
+
+
 
