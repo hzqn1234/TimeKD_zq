@@ -15,7 +15,7 @@ do
     for seed in 42
     do 
         echo "seed: "$seed
-        CUDA_VISIBLE_DEVICES=0 \
+        CUDA_VISIBLE_DEVICES=1 \
         python amex_train.py \
                                         --lrate $lr \
                                         --sampling "100pct" \
@@ -29,10 +29,11 @@ do
                                         --submit \
                                         --batch_size 128 \
                                         --num_workers 8 \
-                                        --feature_w 0.01\
+                                        --feature_w 0.0\
                                         --fcst_w 1\
-                                        --recon_w 0.5\
-                                        --att_w 0.01\
+                                        --recon_w 1.0\
+                                        --att_w 5.0\
+                                        --distill_w 1.0\
                                         --emb_version "v6"\
                                         --remark "emb v6, server 25"\
                                         --epochs 20 

@@ -47,6 +47,7 @@ def parse_args():
     parser.add_argument("--fcst_w", type=float, default=1, help="weight of forecast loss")
     parser.add_argument("--recon_w", type=float, default=0.5, help="weight of reconstruction loss")
     parser.add_argument("--att_w", type=float, default=0.01, help="weight of attention kd loss")
+    parser.add_argument("--distill_w", type=float, default=1.0, help="weight of distillation loss")
     parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')
     parser.add_argument("--epochs", type=int, default=10, help="")
     parser.add_argument('--seed', type=int, default=42, help='random seed')
@@ -180,11 +181,15 @@ class Criterion:
         self.fcst_loss = 'bce'
         self.recon_loss = 'bce'
         self.att_loss = 'smooth_l1'   
+        self.distill_loss = 'bce'
         self.fcst_w    = args.fcst_w
         self.recon_w   = args.recon_w
         self.feature_w = args.feature_w
         self.att_w     = args.att_w
-        self.criterion = KDLoss(self.feature_loss, self.fcst_loss, self.recon_loss, self.att_loss,  self.feature_w,  self.fcst_w,  self.recon_w,  self.att_w)
+        self.distill_w = args.distill_w
+        self.criterion = KDLoss(self.feature_loss, self.fcst_loss, self.recon_loss, self.att_loss, self.distill_loss,
+                                self.feature_w,  self.fcst_w,  self.recon_w,  self.att_w, self.distill_w
+                                )
 
 class trainer:
     def __init__(
@@ -279,10 +284,10 @@ device = torch.device(args.device)
 
 model_specs_template =    "{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}_{args.batch_size}_{args.es_patience}" \
                        +  "_{args.channel}_{args.e_layer}_{args.dropout_n}" \
-                       +  "_{args.feature_w}_{args.fcst_w}_{args.recon_w}_{args.att_w}"
+                       +  "_{args.feature_w}_{args.fcst_w}_{args.recon_w}_{args.att_w}_{args.distill_w}"
 model_specs          =   f"{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}_{args.batch_size}_{args.es_patience}" \
                        + f"_{args.channel}_{args.e_layer}_{args.dropout_n}" \
-                       + f"_{args.feature_w}_{args.fcst_w}_{args.recon_w}_{args.att_w}"
+                       + f"_{args.feature_w}_{args.fcst_w}_{args.recon_w}_{args.att_w}_{args.distill_w}"
 model_path = os.path.join(args.save, args.data_path, model_specs, '')
 
 print(f'model_specs: {model_specs}')
@@ -550,6 +555,7 @@ def create_log_df():
     log_df['fcst_w'] = [args.fcst_w]
     log_df['recon_w'] = [args.recon_w]
     log_df['att_w'] = [args.att_w]
+    log_df['distill_w'] = [args.distill_w]
     log_df['lr'] = [args.lrate]
     log_df['sampling'] = [args.sampling]
     log_df['data_type'] = [args.data_type]
