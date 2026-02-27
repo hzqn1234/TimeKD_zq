@@ -1,12 +1,15 @@
+print("Starting amex_store_emb.py...")
 import os
 # [关键] 防止 Tokenizer 并行导致的 CPU 死锁
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+print("Environment set: TOKENIZERS_PARALLELISM = false")
 
 import torch
 import time
 import math
 import h5py
 import argparse
+import warnings # [新增] 导入 warnings 模块用于触发截断警告
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
@@ -19,7 +22,7 @@ from datetime import datetime
 
 
 class Amex_Dataset:
-    def __init__(self, df_series, uidxs, tokenizer, feature_names, max_len=1024, df_y=None, label_name='target', id_name='customer_ID'):
+    def __init__(self, df_series, uidxs, tokenizer, feature_names, max_len=1024, df_y=None, label_name='target', id_name='customer_ID', allow_truncate=False):
         self.df_series = df_series
         self.df_y = df_y
         self.uidxs = uidxs
@@ -29,11 +32,13 @@ class Amex_Dataset:
         self.tokenizer = tokenizer
         self.feature_names = feature_names
         self.max_len = max_len
+        self.allow_truncate = allow_truncate 
         
         print(f"Dataset initialized with Hard Max Length: {self.max_len}")
+        print(f"Allow Truncate Strategy: {self.allow_truncate}")
         print("Pre-computing static token IDs & Feature Metadata...")
         
-        # --- 缓存优化 & [新增] v5 完整的角色扮演 Prompt ---
+        # --- 缓存优化 & 完整的角色扮演 Prompt ---
         intro_text = (
             "Credit Risk Expert Analysis.\n"
             "Task: Assess default probability based on monthly financial statements.\n"
@@ -46,7 +51,7 @@ class Amex_Dataset:
         self.id_mid = self.tokenizer.encode("\n", add_special_tokens=False)
         self.id_suffix_gt = self.tokenizer.encode("\nGround Truth Label (1=Default): ", add_special_tokens=False)
         
-        # [新增] v5 的推理引导后缀
+        # 推理引导后缀
         suffix_hd_text = (
             "\nBased on the data profile shown above, "
             "analyze the repayment behavior. Predicted Default Risk:"
@@ -61,7 +66,7 @@ class Amex_Dataset:
 
         self.base_overhead = len(self.id_gt_intro) + len(self.id_mid) + len(self.id_suffix_gt) + 5
         
-        # --- v5 的特征语义化映射逻辑 ---
+        # --- 特征语义化映射逻辑 ---
         PREFIX_MAP = {
             'D': 'Delinquency', 'S': 'Spend', 'P': 'Payment', 
             'B': 'Balance', 'R': 'Risk'
@@ -93,7 +98,7 @@ class Amex_Dataset:
     def __len__(self):
         return (len(self.uidxs))
 
-    def process_single_step(self, time_val, feats_vals, y_val, valid_step):
+    def process_single_step(self, time_val, feats_vals, prev_vals, y_val, valid_step):
         if valid_step:
             date_ids = self.date_cache.get(time_val, self.pad_date_id)
         else:
@@ -108,16 +113,31 @@ class Amex_Dataset:
         if self.feature_names is not None and len(self.feature_names) == len(feats_vals):
             grouped_lines = { 'Delinquency': [], 'Spend': [], 'Payment': [], 'Balance': [], 'Risk': [], 'Other': [] }
             
-            for meta, val in zip(self.feature_meta, feats_vals):
+            for idx, (meta, val) in enumerate(zip(self.feature_meta, feats_vals)):
                 cat_key = meta['semantic_cat']
                 if cat_key not in grouped_lines: cat_key = 'Other'
                 
                 line_str = ""
+                # [修改] 优化后的逻辑：只输出激活的类别，极其节省 Token，且符合自然语言直觉
                 if meta['type'] == 'onehot':
                     if val > 0.5:
+                        # 只在值为 1 时输出，例如 "D_68: Type 1"
                         line_str = f"{meta['orig_name']}: Type {meta['cat_val']}"
                 else:
-                    line_str = f"{meta['name']}: {val:.2f}"
+                    # 连续特征的趋势计算处理
+                    val_str = f"{val:.2f}"
+                    trend_str = ""
+                    
+                    if prev_vals is not None:
+                        prev = prev_vals[idx]
+                        diff = val - prev
+                        # 启发式规则：只关注大于 0.01 的有意义变化
+                        if abs(diff) > 0.01:
+                            direction = "↑" if diff > 0 else "↓"
+                            trend_str = f" ({direction}{abs(diff):.2f})"
+                    
+                    # 拼接结果，例如 "Spend_1: 0.00" 或 "Spend_1: 0.05 (↑0.05)"
+                    line_str = f"{meta['name']}: {val_str}{trend_str}"
 
                 if line_str:
                     grouped_lines[cat_key].append(line_str)
@@ -139,15 +159,27 @@ class Amex_Dataset:
 
         vals_ids = self.tokenizer.encode(vals_str, add_special_tokens=False)
         
+        # [新增] 计算未截断前的真实最大 Token 长度
+        raw_gt_len = len(self.id_gt_intro) + len(date_ids) + len(self.id_mid) + len(vals_ids) + len(self.id_suffix_gt) + len(y_label_ids)
+        raw_hd_len = len(self.id_hd_intro) + len(date_ids) + len(self.id_mid) + len(vals_ids) + len(self.id_suffix_hd)
+        raw_max_len = max(raw_gt_len, raw_hd_len)
+        
+        # [修改] 强制截断丢失的控制逻辑
         if len(vals_ids) > available_tokens:
-            vals_ids = vals_ids[:available_tokens]
+            if self.allow_truncate:
+                warnings.warn(f"\n[Warning] Token limit exceeded! Required: {raw_max_len}, Max: {self.max_len}. "
+                              f"Truncating features to fit. Tail information will be lost.")
+                vals_ids = vals_ids[:available_tokens]
+            else:
+                # 不允许截断，保留完整长度 (可能会导致后续 forward_tokenized 报 OOM 或索引越界)
+                pass
 
         gt_seq = (self.id_gt_intro + date_ids + self.id_mid + 
                   vals_ids + self.id_suffix_gt + y_label_ids)
         hd_seq = (self.id_hd_intro + date_ids + self.id_mid + 
                   vals_ids + self.id_suffix_hd)
         
-        return gt_seq, hd_seq
+        return gt_seq, hd_seq, raw_max_len # [新增] 返回真实的 token 长度
 
     def __getitem__(self, index):
         i1, i2, idx = self.uidxs[index]
@@ -163,16 +195,23 @@ class Amex_Dataset:
         
         gt_ids_list = []
         hd_ids_list = []
+        sample_raw_max = 0 # [新增] 记录本样本13个时间步中最长的 raw_len
         
         seq_len = 13
         valid_len = len(time_ref)
         
         for t in range(seq_len):
             if t < valid_len:
-                gt_seq, hd_seq = self.process_single_step(time_ref[t], series[t], label, True)
+                # 提取 t-1 时刻的特征用于计算趋势 (当 t=0 时没有上个月数据，传 None)
+                prev_vals = series[t-1] if t > 0 else None
+                gt_seq, hd_seq, raw_len = self.process_single_step(time_ref[t], series[t], prev_vals, label, True)
             else:
-                gt_seq, hd_seq = self.process_single_step(None, np.zeros(series.shape[1]), label, False)
+                # 填充时刻，prev_vals 也传 None
+                gt_seq, hd_seq, raw_len = self.process_single_step(None, np.zeros(series.shape[1]), None, label, False)
             
+            if raw_len > sample_raw_max:
+                sample_raw_max = raw_len
+                
             gt_ids_list.append(torch.tensor(gt_seq, dtype=torch.long))
             hd_ids_list.append(torch.tensor(hd_seq, dtype=torch.long))
 
@@ -207,15 +246,19 @@ class Amex_Dataset:
             'gt_lens': gt_lens,
             'hd_input_ids': hd_input_ids,
             'hd_mask': hd_mask,
-            'hd_lens': hd_lens
+            'hd_lens': hd_lens,
+            'sample_raw_max': sample_raw_max # [新增]
         }
 
     def collate_fn(self, batch):
         batch_idx = np.array([sample['idx'] for sample in batch])
         
         batch_max_len = 0
+        batch_raw_max = 0 # [新增]
         for sample in batch:
             batch_max_len = max(batch_max_len, sample['gt_input_ids'].shape[1], sample['hd_input_ids'].shape[1])
+            if sample['sample_raw_max'] > batch_raw_max:
+                batch_raw_max = sample['sample_raw_max']
                 
         pad_id = self.tokenizer.pad_token_id
         batch_size = len(batch)
@@ -247,7 +290,8 @@ class Amex_Dataset:
             'gt_lens': final_gt_lens,
             'hd_input_ids': final_hd_ids,
             'hd_mask': final_hd_mask,
-            'hd_lens': final_hd_lens
+            'hd_lens': final_hd_lens,
+            'batch_raw_max': batch_raw_max # [新增]
         }
 
 def parse_args():
@@ -266,6 +310,9 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=64)
     # [优化] 限制 Token 长度防止 OOM
     parser.add_argument("--max_token_len", type=int, default=2048) 
+    
+    # [新增] 截断控制参数
+    parser.add_argument("--allow_truncate", type=int, default=0, help="0: 不允许截断 (可能OOM), 1: 允许截断并在发生时发出警告")
 
     # [CHUNK LOGIC]
     parser.add_argument("--chunk_id", type=int, default=0)
@@ -323,7 +370,8 @@ def save_train_embeddings(args, train_test='train'):
         tokenizer=gen_prompt_emb.tokenizer,
         feature_names=dynamic_feature_names,
         max_len=effective_max_len,
-        df_y=y
+        df_y=y,
+        allow_truncate=(args.allow_truncate == 1)
     )
     
     dataloader = DataLoader(
@@ -337,13 +385,15 @@ def save_train_embeddings(args, train_test='train'):
         prefetch_factor=4
     )
 
-    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_05/'
+    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_06/'
     os.makedirs(emb_path, exist_ok=True)
     
     output_h5_path = os.path.join(emb_path, f"{train_test}_embeddings_chunk_{args.chunk_id}.h5")
     print(f"Saving to: {output_h5_path}")
 
-    # [核心优化] 预分配大数组
+    # [新增] 全局跟踪最大原始 Token 长度
+    global_max_raw_len = 0 
+
     with h5py.File(output_h5_path, 'w') as hf:
         
         # Prevent HDF5 crash if total_samples < batch_size
@@ -366,6 +416,10 @@ def save_train_embeddings(args, train_test='train'):
         
         bar = tqdm(dataloader)
         for data in bar:
+            # [新增] 动态更新全局最大原始 Token 长度
+            if data['batch_raw_max'] > global_max_raw_len:
+                global_max_raw_len = data['batch_raw_max']
+                
             batch_ids = data['batch_idx'] 
             current_batch_size = len(batch_ids)
             
@@ -392,7 +446,20 @@ def save_train_embeddings(args, train_test='train'):
             
             global_idx += current_batch_size
 
-    print("Done.")
+    print("\n" + "="*60)
+    print("🎉 Chunk Processing Done.")
+    print(f"📊 Maximum observed raw token length: {global_max_raw_len}")
+    print(f"⚙️ Current max_token_len limit: {effective_max_len}")
+    
+    if global_max_raw_len > effective_max_len:
+        if args.allow_truncate == 1:
+            print(f"⚠️ [WARN] Truncation OCCURRED! Some features were discarded.")
+            print(f"💡 Suggestion: You may safely increase --max_token_len to {global_max_raw_len} in your script if VRAM allows.")
+        else:
+            print(f"❌ [ERROR] Token length exceeded limit and allow_truncate is 0! This may have caused unexpected behavior.")
+    else:
+        print(f"✅ [OK] No truncation occurred. Token length is well within safe limits.")
+    print("="*60 + "\n")
     return 
 
 if __name__ == "__main__":

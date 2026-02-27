@@ -9,7 +9,7 @@
 #SBATCH -w node05
 
 # for lr in 1e-3 1e-4 1e-5 ## 2e-3 2e-4 2e-5
-for lr in 1e-4 1e-5
+for lr in 1e-4
 do
     echo "lr: "$lr
     for seed in 42
@@ -18,7 +18,7 @@ do
         CUDA_VISIBLE_DEVICES=0 \
         python amex_train.py \
                                         --lrate $lr \
-                                        --sampling "10pct" \
+                                        --sampling "100pct" \
                                         --data_type "original" \
                                         --num_nodes 223 \
                                         --es_patience 3 \
@@ -33,8 +33,8 @@ do
                                         --fcst_w 1\
                                         --recon_w 0.5\
                                         --att_w 0.01\
-                                        --emb_version "v5"\
-                                        --remark "emb v5, with distill loss, remove feature loss, server 25"\
+                                        --emb_version "v6"\
+                                        --remark "emb v6, server 25"\
                                         --epochs 20 
     done
 done

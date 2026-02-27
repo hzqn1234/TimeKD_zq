@@ -18,9 +18,11 @@ class UniversalMSK(nn.Module):
         print(f"Loading model: {model_name}...")
         self.backbone = AutoModel.from_pretrained(
             model_name, 
-            output_attentions=True, 
-            output_hidden_states=True,
-            trust_remote_code=True
+            output_attentions=False,      # <--- DISABLED to save VRAM
+            output_hidden_states=False,   # <--- DISABLED to save VRAM
+            trust_remote_code=True,
+            dtype=torch.bfloat16,         # <--- Fixed deprecated warning, uses native Half Precision
+            attn_implementation="sdpa"    # <--- Native PyTorch fast attention (no flash-attn install needed)
         )
 
         self._truncate_layers(l_layer)
@@ -113,9 +115,12 @@ class GenPromptEmb(nn.Module):
         else:
             self.gpt2 = self.msk_module.to(device)
         
+        # --- [FIX APPLIED HERE] ---
+        # Removed .to(torch.bfloat16) and replaced with .float() 
+        # to ensure LayerNorm stability across multiple GPUs
         self.sub_ac = SCA(d_model=self.seq_len, n_heads=1, d_ff=4*d_model, norm='LayerNorm',
                           attn_dropout=0.1, dropout=0.1, pre_norm=True, activation="gelu",
-                          res_attention=True, n_layers=1, store_attn=False).to(self.device)
+                          res_attention=True, n_layers=1, store_attn=False).to(self.device).float()
         
         for param in self.sub_ac.parameters():
             param.requires_grad = False
@@ -129,28 +134,40 @@ class GenPromptEmb(nn.Module):
 
     def forward_tokenized(self, gt_tok_ids, gt_masks, gt_lens, hd_tok_ids, hd_masks, hd_lens):
         """
-        Forward pass with Dynamic Padding
+        Forward pass with Dynamic Padding & Sequential Chunking for memory stability
         """
         batch_size_total = gt_tok_ids.shape[0]
         
+        # Using bfloat16 autocast to match our model precision
         if hasattr(torch, 'amp') and hasattr(torch.amp, 'autocast'):
-            ctx = torch.amp.autocast(device_type='cuda', dtype=torch.float16)
+            ctx = torch.amp.autocast(device_type='cuda', dtype=torch.bfloat16)
         else:
-            ctx = torch.cuda.amp.autocast()
+            ctx = torch.cuda.amp.autocast(dtype=torch.bfloat16)
 
         with ctx:
-            gt_out = self.gpt2(gt_tok_ids, gt_masks)
-            hd_out = self.gpt2(hd_tok_ids, hd_masks)
+            gt_hidden_list = []
+            hd_hidden_list = []
+            
+            # CHUNKING LOGIC: Safely evaluate time-steps without ballooning VRAM
+            # We chunk by 16/32/.. sequences at a time to keep activation memory minimal
+            chunk_size = 32
+            
+            for i in range(0, batch_size_total, chunk_size):
+                end_idx = min(i + chunk_size, batch_size_total)
+                
+                # Forward GT
+                gt_out = self.gpt2(gt_tok_ids[i:end_idx], gt_masks[i:end_idx])
+                gt_h = gt_out.last_hidden_state if hasattr(gt_out, 'last_hidden_state') else (gt_out[0] if isinstance(gt_out, tuple) else gt_out)
+                gt_hidden_list.append(gt_h)
+                
+                # Forward HD
+                hd_out = self.gpt2(hd_tok_ids[i:end_idx], hd_masks[i:end_idx])
+                hd_h = hd_out.last_hidden_state if hasattr(hd_out, 'last_hidden_state') else (hd_out[0] if isinstance(hd_out, tuple) else hd_out)
+                hd_hidden_list.append(hd_h)
 
-        if isinstance(gt_out, torch.Tensor):
-            gt_hidden = gt_out
-            hd_hidden = hd_out
-        elif hasattr(gt_out, 'last_hidden_state'):
-            gt_hidden = gt_out.last_hidden_state
-            hd_hidden = hd_out.last_hidden_state
-        else:
-            gt_hidden = gt_out[0]
-            hd_hidden = hd_out[0]
+            # Concatenate chunks back together
+            gt_hidden = torch.cat(gt_hidden_list, dim=0)
+            hd_hidden = torch.cat(hd_hidden_list, dim=0)
 
         # Use lengths to extract the correct last token (not padding)
         gt_emb_flat = self.gather_last_token(gt_hidden, gt_lens)
@@ -164,9 +181,13 @@ class GenPromptEmb(nn.Module):
         gt_emb = gt_emb.permute(0, 2, 1) # (B, D, S)
         hd_emb = hd_emb.permute(0, 2, 1)
 
-        sub_out = self.sub_ac(gt_emb, hd_emb, hd_emb)
+        # Explicitly cast BFloat16/Float tensors to standard Float32 
+        # to match the self.sub_ac layer weights and prevent LayerNorm crashes
+        sub_out = self.sub_ac(gt_emb.float(), hd_emb.float(), hd_emb.float())
         
-        return sub_out.permute(0, 2, 1) # (B, S, D)
+        # --- [DISK SPACE OPTIMIZATION HERE] ---
+        # Cast to standard half precision (.half() / FP16) to cut .h5 file sizes in half.
+        return sub_out.permute(0, 2, 1).half() # (B, S, D)
 
     def generate_embeddings(self, x, y, time_ref):
         pass
