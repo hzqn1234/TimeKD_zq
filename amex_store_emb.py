@@ -1,6 +1,8 @@
+print("Starting amex_store_emb.py...")
 import os
 # [关键] 防止 Tokenizer 并行导致的 CPU 死锁
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+print("Environment set: TOKENIZERS_PARALLELISM = false")
 
 import torch
 import time

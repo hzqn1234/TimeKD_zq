@@ -162,8 +162,10 @@ class Amex_Dataset:
                 v = item['LABEL'].astype(np.float32)
                 batch_y[i] = torch.tensor(v).float()
         
+        # --- [FIX APPLIED HERE] ---
+        # Added .float() at the end to automatically cast loaded FP16 tensors back to FP32
         if self.is_train:
-            batch_emb_tensor = torch.stack([sample['emb_tensor'] for sample in batch], dim=0) 
+            batch_emb_tensor = torch.stack([sample['emb_tensor'] for sample in batch], dim=0).float()
 
         return {'batch_series': batch_series,
                 'batch_mask': batch_mask,
@@ -264,6 +266,8 @@ if args.emb_version == 'v4':
     emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_04/'
 elif args.emb_version == 'v5':
     emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_05/'
+elif args.emb_version == 'v6':
+    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_06/'
 else:
     emb_path = None
 

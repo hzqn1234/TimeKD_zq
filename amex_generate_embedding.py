@@ -115,10 +115,12 @@ class GenPromptEmb(nn.Module):
         else:
             self.gpt2 = self.msk_module.to(device)
         
-        # Ensure Sub_CA handles bfloat16 properly or is aligned natively
+        # --- [FIX APPLIED HERE] ---
+        # Removed .to(torch.bfloat16) and replaced with .float() 
+        # to ensure LayerNorm stability across multiple GPUs
         self.sub_ac = SCA(d_model=self.seq_len, n_heads=1, d_ff=4*d_model, norm='LayerNorm',
                           attn_dropout=0.1, dropout=0.1, pre_norm=True, activation="gelu",
-                          res_attention=True, n_layers=1, store_attn=False).to(self.device).to(torch.bfloat16)
+                          res_attention=True, n_layers=1, store_attn=False).to(self.device).float()
         
         for param in self.sub_ac.parameters():
             param.requires_grad = False
@@ -147,8 +149,8 @@ class GenPromptEmb(nn.Module):
             hd_hidden_list = []
             
             # CHUNKING LOGIC: Safely evaluate time-steps without ballooning VRAM
-            # We chunk by 16 sequences at a time to keep activation memory minimal
-            chunk_size = 16
+            # We chunk by 16/32/.. sequences at a time to keep activation memory minimal
+            chunk_size = 32
             
             for i in range(0, batch_size_total, chunk_size):
                 end_idx = min(i + chunk_size, batch_size_total)
@@ -179,10 +181,13 @@ class GenPromptEmb(nn.Module):
         gt_emb = gt_emb.permute(0, 2, 1) # (B, D, S)
         hd_emb = hd_emb.permute(0, 2, 1)
 
-        sub_out = self.sub_ac(gt_emb, hd_emb, hd_emb)
+        # Explicitly cast BFloat16/Float tensors to standard Float32 
+        # to match the self.sub_ac layer weights and prevent LayerNorm crashes
+        sub_out = self.sub_ac(gt_emb.float(), hd_emb.float(), hd_emb.float())
         
-        # Ensure float32 return if you save to standard HDF5 floats down the line
-        return sub_out.permute(0, 2, 1).float() # (B, S, D)
+        # --- [DISK SPACE OPTIMIZATION HERE] ---
+        # Cast to standard half precision (.half() / FP16) to cut .h5 file sizes in half.
+        return sub_out.permute(0, 2, 1).half() # (B, S, D)
 
     def generate_embeddings(self, x, y, time_ref):
         pass
