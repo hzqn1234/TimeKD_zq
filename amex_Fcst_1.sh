@@ -9,7 +9,7 @@
 #SBATCH -w node05
 
 # for lr in 1e-3 1e-4 1e-5 ## 2e-3 2e-4 2e-5
-for lr in 1e-3
+for lr in 1e-4
 do
     echo "lr: "$lr
     for seed in 42
