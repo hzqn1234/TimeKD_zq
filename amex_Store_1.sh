@@ -15,7 +15,7 @@ GPUS="0 1 2 3 4"
 
 # Define parameters as variables so they can be reused for the path
 DATA_TYPE="original"
-SAMPLING="1pct"
+SAMPLING="100pct"
 EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/emb_07"
 echo "Embedding output will be saved to: ${EMB_DIR}"
 
