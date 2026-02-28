@@ -15,8 +15,12 @@ GPUS="0 1 2 3 4"
 
 # Define parameters as variables so they can be reused for the path
 DATA_TYPE="original"
-SAMPLING="1pct"
-EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/emb_07"
+SAMPLING="100pct"
+EMB_VERSION="v8"
+
+V_NUM=$(echo $EMB_VERSION | tr -dc '0-9')
+FORMATTED_VERSION=$(printf "emb_%02d" $V_NUM)
+EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/${FORMATTED_VERSION}"
 echo "Embedding output will be saved to: ${EMB_DIR}"
 
 # === NEW CLEANUP LOGIC ===
@@ -55,6 +59,7 @@ for GPU_ID in $GPUS; do
             --total_chunks $TOTAL_CHUNKS \
             --allow_truncate 0 \
             --l_layers 16 \
+            --emb_version "$EMB_VERSION" \
             > store_emb_1_chunk_${i}.log 2>&1 &
             
     # Capture the PID of the last background command
