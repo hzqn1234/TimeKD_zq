@@ -118,7 +118,6 @@ class Amex_Dataset:
             series = series.reshape((-1,) + series.shape[-1:])
         
         if self.is_train:
-            # 1. 查找 idx 对应的文件和行号
             mapping = self.id_to_file_and_row.get(str(idx))
             
             if mapping is None:
@@ -126,13 +125,11 @@ class Amex_Dataset:
             
             fpath, row_idx = mapping
 
-            # 2. Lazy load and cache HDF5 file handlers per worker process
             if not hasattr(self, 'h5_handlers'):
                 self.h5_handlers = {}
             if fpath not in self.h5_handlers:
                 self.h5_handlers[fpath] = h5py.File(fpath, 'r')
 
-            # 3. Read from the cached handler
             emb_data = self.h5_handlers[fpath]['embeddings'][row_idx]
             emb_tensor = torch.from_numpy(emb_data)
 
@@ -186,16 +183,15 @@ class Criterion:
         self.att_loss = 'smooth_l1'   
         self.distill_loss = 'bce'
         
-        # 动态控制各阶段的Loss权重组合
         if stage == 1:
             self.fcst_w    = 0.0
-            self.recon_w   = 1.0  # Stage 1: 只优化Teacher的标签预测
+            self.recon_w   = 1.0  
             self.feature_w = 0.0
             self.att_w     = 0.0
             self.distill_w = 0.0
         elif stage == 2:
             self.fcst_w    = args.fcst_w
-            self.recon_w   = 0.0  # Stage 2: 冻结Teacher，无需计算其重建Loss
+            self.recon_w   = 0.0  
             self.feature_w = args.feature_w
             self.att_w     = args.att_w
             self.distill_w = args.distill_w
@@ -241,7 +237,6 @@ class trainer:
         self.model = Amodel(223, 16, 1, 3, 128, d_llm=d_llm, device=self.device)
         self.model.to(self.device)
 
-        # 核心修改点：根据Stage冻结不同部分的梯度
         if stage == 1:
             print("\n=== Stage 1: Freezing Student, Training Teacher ===")
             for param in self.model.input_series_block_n1.parameters(): param.requires_grad = False
@@ -253,19 +248,19 @@ class trainer:
                 self.model.load_state_dict(torch.load(teacher_path, map_location=self.device), strict=False)
                 print(f"Loaded Teacher pre-trained weights from: {teacher_path}")
             elif teacher_path is None:
-                # 说明这是在 Test/Predict 阶段，正常跳过，不报 Warning
                 print("Test/Predict phase initialized (Teacher weights will be loaded with the whole model).")
             else:
                 print(f"WARNING: Valid Teacher path not provided for Stage 2! ({teacher_path})")
                 
             for param in self.model.input_series_block_n1_t.parameters(): param.requires_grad = False
+            # [新增] 把 Teacher 专属的 Raw 数值特征投影层也冻结
+            for param in self.model.input_series_block_n1_t_raw.parameters(): param.requires_grad = False
             for param in self.model.transformer_encoder_t.parameters(): param.requires_grad = False
             for param in self.model.output_block_t.parameters(): param.requires_grad = False
 
         trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         print("The number of trainable parameters: {}".format(trainable_params))
 
-        # 仅将需要更新的参数传递给优化器
         optim_params = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = optim.AdamW(optim_params, lr=lrate, weight_decay=wdecay)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=min(epochs, 100), eta_min=1e-8)
@@ -273,19 +268,6 @@ class trainer:
     def train(self, data):
         self.model.train()
         self.optimizer.zero_grad()
-        
-        # ====================================================
-        # [方案B 核心修改]: 物理破坏特权特征的"标签捷径"
-        # ====================================================
-        if self.stage in [1, 2] and data.get('batch_emb_tensor') is not None:
-            emb = data['batch_emb_tensor'].to(self.device)
-            # 1. 注入强高斯噪声 (破坏精确的数值映射)
-            noise = torch.randn_like(emb) * 0.5  # 0.5 为噪声强度，可根据需要调到 1.0
-            emb = emb + noise
-            # 2. 强行丢弃一部分特征 (强迫模型寻找其他非作弊特征)
-            emb = torch.nn.functional.dropout(emb, p=0.4, training=True) # 丢弃 40%
-            data['batch_emb_tensor'] = emb
-        # ====================================================
 
         ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(data)
         y = data['batch_y'].to(self.device)
@@ -299,7 +281,6 @@ class trainer:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip) 
         self.optimizer.step() 
         
-        # Stage 1 时评估Teacher的预测能力以决定早停
         out_metric = prompt_out if self.stage == 1 else ts_out
         return loss.item(), out_metric
 
@@ -338,8 +319,6 @@ elif args.emb_version == 'v5':
     emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_05/'
 elif args.emb_version == 'v6':
     emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_06/'
-elif args.emb_version == 'v7':
-    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_07/'
 else:
     emb_path = None
 
@@ -349,7 +328,6 @@ print(f'emb_path: {emb_path}')
 seed_it(args.seed)
 device = torch.device(args.device)
 
-# 增加 S{args.stage}_ 前缀，确保阶段1和阶段2的模型/日志保存在不同目录
 model_specs_template =    "S{args.stage}_{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}_{args.batch_size}_{args.es_patience}" \
                        +  "_{args.channel}_{args.e_layer}_{args.dropout_n}" \
                        +  "_{args.feature_w}_{args.fcst_w}_{args.recon_w}_{args.att_w}_{args.distill_w}"
@@ -365,7 +343,6 @@ if not os.path.exists(model_path):
 
 print(args)
 
-# 全局初始化 Criterion
 criterion = Criterion(args.stage)
 
 def main_train():
@@ -439,7 +416,6 @@ def main_train():
             log = "Epoch: {:03d}, Training Time: {:.4f} secs"
             print(log.format(i, (t2 - t1)))
 
-            # Validation
             val_loss = []
             val_outputs = []
             val_ys = []
@@ -459,7 +435,6 @@ def main_train():
             log = "Epoch: {:03d}, Validation Time: {:.4f} secs"
             print(log.format(i, (s2 - s1)))
         
-            # calculate train metrics
             train_pre = torch.cat(train_outputs, dim=0)
             train_y = torch.cat(train_ys, dim=0)
             train_real = torch.Tensor(train_y).to(device).float()
@@ -469,7 +444,6 @@ def main_train():
             train_score = metric(pred.detach(), real.detach())
             print(f'train_score: {train_score}')
 
-            # calculate val metrics
             val_pre = torch.cat(val_outputs, dim=0)
             val_y = torch.cat(val_ys, dim=0)
             val_real = torch.Tensor(val_y).to(device).float()
@@ -479,7 +453,6 @@ def main_train():
             val_score = metric(pred.detach(), real.detach())
             print(f'val_score: {val_score}')
 
-            # Log loss
             mtrain_loss = np.mean(train_loss)
             mvalid_loss = np.mean(val_loss)
 
@@ -518,7 +491,6 @@ def main_train():
         print(f"The epoch of the best result：{bestid}")
         print(f"The valid loss of the best model {str(round(his_loss[bestid - 1], 4))} \n", )
     
-        # output train result to log file
         log_df = create_log_df()
         log_df['fold_index'] = [fold_index]
         log_df['amex_metric'] = [f"{best_score[0]:.6g}"]
@@ -574,7 +546,7 @@ def main_test(is_predict=False):
             device=device,
             epochs=args.epochs,
             stage=args.stage,
-            teacher_path=None  # Test 阶段直接用下一行载入整个模型
+            teacher_path=None  
         )
         
         model = engine.model
@@ -586,9 +558,18 @@ def main_test(is_predict=False):
     for _, data in enumerate(tqdm(test_dataloader)):
         with torch.no_grad():
             if data['batch_series'].shape[0] == 1:
+                # [提分彩蛋]: m(data)[2] 是Student, m(data)[3] 是Teacher
+                # 这里默认保留Student输出。如果您想做融合 Ensemble 提分，
+                # 可以改成: pred_teacher = torch.tensor([torch.stack([m(data)[3] for m in models], 0).mean(0)]).to(device)
                 pred_y = torch.tensor([torch.stack([m(data)[2] for m in models], 0).mean(0)]).to(device)
             else:
                 pred_y = torch.stack([m(data)[2] for m in models], 0).mean(0)
+                
+                # [提分彩蛋]: Teacher 模型融合代码示例：
+                # pred_student = torch.stack([m(data)[2] for m in models], 0).mean(0)
+                # pred_teacher = torch.stack([m(data)[3] for m in models], 0).mean(0)
+                # pred_y = (pred_student * 0.4) + (pred_teacher * 0.6)
+                
         test_outputs.append(pred_y)
 
     print(pred_y.shape)
@@ -611,7 +592,6 @@ def main_test(is_predict=False):
     print(f"Testing ends at {test_end_time}")
     print(f"Total test time spent: {test_duration}") 
 
-    # output test result to log file
     log_df = create_log_df()
     log_df['is_predict'] = [is_predict]
     if not is_predict:
@@ -666,7 +646,6 @@ if __name__ == "__main__":
     if args.train:
         main_train()      
 
-    # Teacher网络不能在不带特征的Test集上测，所以限制仅在 Stage 0 或 2 测试
     if args.test:
         if args.stage == 1:
             print('>>> 跳过测试: Stage 1 为Teacher预训练，无法在没有 Embedding 的 Test 集上进行推理。')
