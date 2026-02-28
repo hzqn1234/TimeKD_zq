@@ -8,8 +8,9 @@
 #SBATCH -w node14
 
 GPU_ID=0
-SAMPLING="10pct"
-LRs="1e-4"
+SAMPLING="1pct"
+LRs="1e-3"
+EMB_version="v7"
 
 for lr in $LRs
 do
@@ -41,7 +42,7 @@ do
             --recon_w 1.0 \
             --att_w 0.0 \
             --distill_w 0.0 \
-            --emb_version "v6" \
+            --emb_version "$EMB_version" \
             --remark "Stage 1 Pretrain Teacher" \
             --epochs 20 
             
@@ -80,7 +81,7 @@ do
             --recon_w 0.0 \
             --att_w 0.5 \
             --distill_w 1.0 \
-            --emb_version "v6" \
+            --emb_version "$EMB_version" \
             --remark "Stage 2 Distillation" \
             --epochs 20 
     done

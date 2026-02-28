@@ -338,6 +338,8 @@ elif args.emb_version == 'v5':
     emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_05/'
 elif args.emb_version == 'v6':
     emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_06/'
+elif args.emb_version == 'v7':
+    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_07/'
 else:
     emb_path = None
 

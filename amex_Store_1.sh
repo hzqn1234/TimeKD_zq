@@ -2,21 +2,21 @@
 
 #### SBATCH -o gpu-job-%j.output
 #SBATCH -o gpu-job-store-emb-1.output
-#SBATCH -p PA100q
+#SBATCH -p RTXA6Kq
 # SBATCH --gres=gpu:4
 
 #SBATCH -n 1
 #SBATCH -c 24
-#SBATCH -w node02
+#SBATCH -w node16
 
 # Define the specific GPUs you want to use as a space-separated string (NOT an array).
 # You can change this to GPUS="0" to run on a single GPU, or GPUS="0 1 2" for multiple.
-GPUS="5 6 7" 
+GPUS="0 1 2 3 4" 
 
 # Define parameters as variables so they can be reused for the path
 DATA_TYPE="original"
-SAMPLING="10pct"
-EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/emb_06"
+SAMPLING="1pct"
+EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/emb_07"
 echo "Embedding output will be saved to: ${EMB_DIR}"
 
 # === NEW CLEANUP LOGIC ===
