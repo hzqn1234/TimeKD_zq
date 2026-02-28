@@ -27,6 +27,10 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:150"
 
 def parse_args():
     parser = argparse.ArgumentParser()
+    # ================= 新增阶段控制参数 =================
+    parser.add_argument("--stage", type=int, default=0, help="0: 联合训练, 1: 仅训练Teacher(预训练), 2: 仅训练Student(蒸馏)")
+    parser.add_argument("--teacher_dir", type=str, default="", help="Stage 2需要提供Stage 1训练输出的best models所在目录")
+    # ====================================================
     parser.add_argument("--device", type=str, default="cuda", help="")
     parser.add_argument("--data_path", type=str, default="Amex", help="data path")
     parser.add_argument("--sampling", type=str, default='100pct', help="Sampling ratio")
@@ -163,8 +167,6 @@ class Amex_Dataset:
                 v = item['LABEL'].astype(np.float32)
                 batch_y[i] = torch.tensor(v).float()
         
-        # --- [FIX APPLIED HERE] ---
-        # Added .float() at the end to automatically cast loaded FP16 tensors back to FP32
         if self.is_train:
             batch_emb_tensor = torch.stack([sample['emb_tensor'] for sample in batch], dim=0).float()
 
@@ -176,17 +178,33 @@ class Amex_Dataset:
                 }
 
 class Criterion:
-    def __init__(self):
+    def __init__(self, stage):
         self.feature_loss = 'smooth_l1'  
         self.fcst_loss = 'bce'
         self.recon_loss = 'bce'
         self.att_loss = 'smooth_l1'   
         self.distill_loss = 'bce'
-        self.fcst_w    = args.fcst_w
-        self.recon_w   = args.recon_w
-        self.feature_w = args.feature_w
-        self.att_w     = args.att_w
-        self.distill_w = args.distill_w
+        
+        # 动态控制各阶段的Loss权重组合
+        if stage == 1:
+            self.fcst_w    = 0.0
+            self.recon_w   = 1.0  # Stage 1: 只优化Teacher的标签预测
+            self.feature_w = 0.0
+            self.att_w     = 0.0
+            self.distill_w = 0.0
+        elif stage == 2:
+            self.fcst_w    = args.fcst_w
+            self.recon_w   = 0.0  # Stage 2: 冻结Teacher，无需计算其重建Loss
+            self.feature_w = args.feature_w
+            self.att_w     = args.att_w
+            self.distill_w = args.distill_w
+        else:
+            self.fcst_w    = args.fcst_w
+            self.recon_w   = args.recon_w
+            self.feature_w = args.feature_w
+            self.att_w     = args.att_w
+            self.distill_w = args.distill_w
+
         self.criterion = KDLoss(self.feature_loss, self.fcst_loss, self.recon_loss, self.att_loss, self.distill_loss,
                                 self.feature_w,  self.fcst_w,  self.recon_w,  self.att_w, self.distill_w
                                 )
@@ -206,51 +224,79 @@ class trainer:
         lrate,
         wdecay,
         device,
-        epochs
+        epochs,
+        stage=0,
+        teacher_path=None
     ):
         self.MSE = MSE
         self.MAE = MAE
         self.clip = 5
         self.scaler = scaler
         self.device = device
+        self.stage = stage
         self.criterion = criterion.criterion
 
         self.model = Amodel(223, 16, 1, 3, 128, d_llm=d_llm, device=self.device)
         self.model.to(self.device)
 
-        print("The number of parameters: {}".format(self.model.param_num()))
+        # 核心修改点：根据Stage冻结不同部分的梯度
+        if stage == 1:
+            print("\n=== Stage 1: Freezing Student, Training Teacher ===")
+            for param in self.model.input_series_block_n1.parameters(): param.requires_grad = False
+            for param in self.model.transformer_encoder.parameters(): param.requires_grad = False
+            for param in self.model.output_block.parameters(): param.requires_grad = False
+        elif stage == 2:
+            print("\n=== Stage 2: Freezing Teacher, Training Student ===")
+            if teacher_path and os.path.exists(teacher_path):
+                self.model.load_state_dict(torch.load(teacher_path, map_location=self.device), strict=False)
+                print(f"Loaded Teacher pre-trained weights from: {teacher_path}")
+            else:
+                print(f"WARNING: Valid Teacher path not provided for Stage 2! ({teacher_path})")
+                
+            for param in self.model.input_series_block_n1_t.parameters(): param.requires_grad = False
+            for param in self.model.transformer_encoder_t.parameters(): param.requires_grad = False
+            for param in self.model.output_block_t.parameters(): param.requires_grad = False
 
-        self.optimizer = optim.AdamW(self.model.parameters(), lr=lrate, weight_decay=wdecay)
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print("The number of trainable parameters: {}".format(trainable_params))
+
+        # 仅将需要更新的参数传递给优化器
+        optim_params = [p for p in self.model.parameters() if p.requires_grad]
+        self.optimizer = optim.AdamW(optim_params, lr=lrate, weight_decay=wdecay)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=min(epochs, 100), eta_min=1e-8)
 
     def train(self, data):
         self.model.train()
         self.optimizer.zero_grad()
         ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(data)
-        y = data['batch_y'].to(device)
+        y = data['batch_y'].to(self.device)
         
         if data['batch_series'].shape[0] == 1:
-            y =  torch.tensor([y])
+            y =  torch.tensor([y]).to(self.device)
         
         loss = self.criterion(ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att, y)
         loss.backward()
         if self.clip is not None:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip) 
         self.optimizer.step() 
-        return loss.item(), ts_out
+        
+        # Stage 1 时评估Teacher的预测能力以决定早停
+        out_metric = prompt_out if self.stage == 1 else ts_out
+        return loss.item(), out_metric
 
     def eval(self, data):
         self.model.eval()
 
         with torch.no_grad():
             ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(data)
-            y = data['batch_y'].to(device)
+            y = data['batch_y'].to(self.device)
 
             if data['batch_series'].shape[0] == 1:
-                y =  torch.tensor([y])
+                y =  torch.tensor([y]).to(self.device)
 
             loss = self.criterion(ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att, y)
-        return loss.item(), ts_out
+            out_metric = prompt_out if self.stage == 1 else ts_out
+        return loss.item(), out_metric
 
 
 def seed_it(seed):
@@ -282,10 +328,11 @@ print(f'emb_path: {emb_path}')
 seed_it(args.seed)
 device = torch.device(args.device)
 
-model_specs_template =    "{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}_{args.batch_size}_{args.es_patience}" \
+# 增加 S{args.stage}_ 前缀，确保阶段1和阶段2的模型/日志保存在不同目录
+model_specs_template =    "S{args.stage}_{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}_{args.batch_size}_{args.es_patience}" \
                        +  "_{args.channel}_{args.e_layer}_{args.dropout_n}" \
                        +  "_{args.feature_w}_{args.fcst_w}_{args.recon_w}_{args.att_w}_{args.distill_w}"
-model_specs          =   f"{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}_{args.batch_size}_{args.es_patience}" \
+model_specs          =   f"S{args.stage}_{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}_{args.batch_size}_{args.es_patience}" \
                        + f"_{args.channel}_{args.e_layer}_{args.dropout_n}" \
                        + f"_{args.feature_w}_{args.fcst_w}_{args.recon_w}_{args.att_w}_{args.distill_w}"
 model_path = os.path.join(args.save, args.data_path, model_specs, '')
@@ -297,7 +344,8 @@ if not os.path.exists(model_path):
 
 print(args)
 
-criterion = Criterion()
+# 全局初始化 Criterion
+criterion = Criterion(args.stage)
 
 def main_train():
     train_start_time = datetime.now()
@@ -313,6 +361,13 @@ def main_train():
         fold_train_start_time =  datetime.now()
         print(f"Start training... Fold {fold_index} at {fold_train_start_time}")
 
+        teacher_model_path = None
+        if args.stage == 2:
+            if args.teacher_dir:
+                teacher_model_path = os.path.join(args.teacher_dir, f"best_model_fold_{fold_index}.pth")
+            else:
+                raise ValueError("Stage 2 必须提供 --teacher_dir 参数！")
+
         engine = trainer(
             scaler=StandardScaler,
             channel=args.channel,
@@ -326,7 +381,9 @@ def main_train():
             lrate=args.lrate,
             wdecay=args.weight_decay,
             device=device,
-            epochs=args.epochs
+            epochs=args.epochs,
+            stage=args.stage,
+            teacher_path=teacher_model_path
         )
 
         train_dataset = Amex_Dataset(trainval_series, [trainval_series_idx[i] for i in trn_index], trainval_y)
@@ -494,7 +551,9 @@ def main_test(is_predict=False):
             lrate=args.lrate,
             wdecay=args.weight_decay,
             device=device,
-            epochs=args.epochs
+            epochs=args.epochs,
+            stage=args.stage,
+            teacher_path=None  # Test 阶段直接用下一行载入整个模型
         )
         
         model = engine.model
@@ -549,6 +608,7 @@ def main_test(is_predict=False):
 
 def create_log_df():
     log_df = pd.DataFrame()
+    log_df['stage'] = [args.stage]
     log_df['model_specs'] = [model_specs]
     log_df['log_time'] = [datetime.now().strftime('%Y-%m-%d %H:%M:%S')] 
     log_df['feature_w'] = [args.feature_w]
@@ -585,21 +645,30 @@ if __name__ == "__main__":
     if args.train:
         main_train()      
 
+    # Teacher网络不能在不带特征的Test集上测，所以限制仅在 Stage 0 或 2 测试
     if args.test:
-        if args.data_type == 'original' and args.sampling == '100pct':
+        if args.stage == 1:
+            print('>>> 跳过测试: Stage 1 为Teacher预训练，无法在没有 Embedding 的 Test 集上进行推理。')
+        elif args.data_type == 'original' and args.sampling == '100pct':
             print('Skip Test for orginal_100pct')
             pass
         else:
             main_test()
 
     if args.predict:
-        log_df = main_test(is_predict=True)
+        if args.stage == 1:
+            print('>>> 跳过预测: Stage 1 为Teacher预训练，无法在没有 Embedding 的 Test 集上进行预测。')
+        else:
+            log_df = main_test(is_predict=True)
 
     if args.submit:
-        if log_df is not None:
-            submit_message = log_df.to_json(orient='records')
+        if args.stage == 1:
+            print('>>> 跳过提交: 无法提交 Stage 1 的Teacher模型预测结果。')
         else:
-            submit_message = f'{model_specs_template}: {model_specs}'
-        os.system(f"""kaggle competitions submit -c amex-default-prediction -f {model_path}/submission.csv.zip -m '{submit_message}'""")
-        print("\n")
-        pass
+            if log_df is not None:
+                submit_message = log_df.to_json(orient='records')
+            else:
+                submit_message = f'{model_specs_template}: {model_specs}'
+            os.system(f"""kaggle competitions submit -c amex-default-prediction -f {model_path}/submission.csv.zip -m '{submit_message}'""")
+            print("\n")
+            pass
