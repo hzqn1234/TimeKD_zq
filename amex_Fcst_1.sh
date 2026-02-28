@@ -1,15 +1,17 @@
 #!/bin/sh
 
 #SBATCH -o gpu-job-train-1.output
-#SBATCH -p PA100q
+#SBATCH -p HPCAIq
 #SBATCH --gpus-per-node=1
 #SBATCH -n 1
 #SBATCH -c 8
-#SBATCH -w node05
+#SBATCH -w node14
 
 GPU_ID=0
+SAMPLING="10pct"
+LRs="1e-4"
 
-for lr in 1e-4
+for lr in $LRs
 do
     echo "==================================================="
     echo "lr: "$lr
@@ -26,7 +28,7 @@ do
         python amex_train.py \
             --stage 1 \
             --lrate $lr \
-            --sampling "100pct" \
+            --sampling "$SAMPLING" \
             --data_type "original" \
             --num_nodes 223 \
             --es_patience 3 \
@@ -62,7 +64,7 @@ do
             --stage 2 \
             --teacher_dir "$TEACHER_DIR" \
             --lrate $lr \
-            --sampling "100pct" \
+            --sampling "$SAMPLING" \
             --data_type "original" \
             --num_nodes 223 \
             --es_patience 3 \

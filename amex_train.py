@@ -52,6 +52,7 @@ def parse_args():
     parser.add_argument("--recon_w", type=float, default=0.5, help="weight of reconstruction loss")
     parser.add_argument("--att_w", type=float, default=0.01, help="weight of attention kd loss")
     parser.add_argument("--distill_w", type=float, default=1.0, help="weight of distillation loss")
+    parser.add_argument("--temperature", type=float, default=5.0, help="Temperature for Soft Label KD")
     parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')
     parser.add_argument("--epochs", type=int, default=10, help="")
     parser.add_argument('--seed', type=int, default=42, help='random seed')
@@ -206,7 +207,8 @@ class Criterion:
             self.distill_w = args.distill_w
 
         self.criterion = KDLoss(self.feature_loss, self.fcst_loss, self.recon_loss, self.att_loss, self.distill_loss,
-                                self.feature_w,  self.fcst_w,  self.recon_w,  self.att_w, self.distill_w
+                                self.feature_w,  self.fcst_w,  self.recon_w,  self.att_w, self.distill_w,
+                                temperature=args.temperature
                                 )
 
 class trainer:
@@ -250,6 +252,9 @@ class trainer:
             if teacher_path and os.path.exists(teacher_path):
                 self.model.load_state_dict(torch.load(teacher_path, map_location=self.device), strict=False)
                 print(f"Loaded Teacher pre-trained weights from: {teacher_path}")
+            elif teacher_path is None:
+                # 说明这是在 Test/Predict 阶段，正常跳过，不报 Warning
+                print("Test/Predict phase initialized (Teacher weights will be loaded with the whole model).")
             else:
                 print(f"WARNING: Valid Teacher path not provided for Stage 2! ({teacher_path})")
                 
@@ -268,6 +273,20 @@ class trainer:
     def train(self, data):
         self.model.train()
         self.optimizer.zero_grad()
+        
+        # ====================================================
+        # [方案B 核心修改]: 物理破坏特权特征的"标签捷径"
+        # ====================================================
+        if self.stage in [1, 2] and data.get('batch_emb_tensor') is not None:
+            emb = data['batch_emb_tensor'].to(self.device)
+            # 1. 注入强高斯噪声 (破坏精确的数值映射)
+            noise = torch.randn_like(emb) * 0.5  # 0.5 为噪声强度，可根据需要调到 1.0
+            emb = emb + noise
+            # 2. 强行丢弃一部分特征 (强迫模型寻找其他非作弊特征)
+            emb = torch.nn.functional.dropout(emb, p=0.4, training=True) # 丢弃 40%
+            data['batch_emb_tensor'] = emb
+        # ====================================================
+
         ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(data)
         y = data['batch_y'].to(self.device)
         
