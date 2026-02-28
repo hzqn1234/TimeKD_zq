@@ -313,14 +313,13 @@ def seed_it(seed):
 args = parse_args()
 INPUT_PATH  = f'../../000_data/amex/{args.data_type}_{args.sampling}'
 
-if args.emb_version == 'v4':
-    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_04/'
-elif args.emb_version == 'v5':
-    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_05/'
-elif args.emb_version == 'v6':
-    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_06/'
+# 自动解析提取数字并补零 (例如 'v7' -> '7' -> '07')
+if args.emb_version and args.emb_version.startswith('v') and args.emb_version[1:].isdigit():
+    v_num = args.emb_version[1:].zfill(2) 
+    emb_path = f'{INPUT_PATH}/emb_{v_num}/'
 else:
     emb_path = None
+
 
 print(f'INPUT_PATH: {INPUT_PATH}')
 print(f'emb_path: {emb_path}')
