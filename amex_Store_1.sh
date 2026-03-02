@@ -7,15 +7,15 @@
 
 #SBATCH -n 1
 #SBATCH -c 24
-#SBATCH -w node16
+#SBATCH -w node09
 
 # Define the specific GPUs you want to use as a space-separated string (NOT an array).
 # You can change this to GPUS="0" to run on a single GPU, or GPUS="0 1 2" for multiple.
-GPUS="0 1 2 3 4" 
+GPUS="4 5 6 7" 
 
 # Define parameters as variables so they can be reused for the path
 DATA_TYPE="original"
-SAMPLING="100pct"
+SAMPLING="10pct"
 EMB_VERSION="v8"
 
 V_NUM=$(echo $EMB_VERSION | tr -dc '0-9')

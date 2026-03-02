@@ -1,16 +1,16 @@
 #!/bin/sh
 
 #SBATCH -o gpu-job-train-1.output
-#SBATCH -p HPCAIq
+#SBATCH -p NH100q
 #SBATCH --gpus-per-node=1
 #SBATCH -n 1
 #SBATCH -c 8
-#SBATCH -w node14
+#SBATCH -w node07
 
-GPU_ID=0
-SAMPLING="1pct"
-LRs="1e-3"
-EMB_version="v7"
+GPU_ID=6
+SAMPLING="100pct"
+LRs="1e-4 5e-5"
+EMB_version="v8"
 
 for lr in $LRs
 do
