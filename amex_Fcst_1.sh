@@ -1,15 +1,15 @@
 #!/bin/sh
 
 #SBATCH -o gpu-job-train-1.output
-#SBATCH -p NH100q
+#SBATCH -p RTXA6Kq
 #SBATCH --gpus-per-node=1
 #SBATCH -n 1
 #SBATCH -c 8
-#SBATCH -w node07
+#SBATCH -w node09
 
-GPU_ID=6
+GPU_ID=7
 SAMPLING="100pct"
-LRs="1e-4 5e-5"
+LRs="1e-4"
 EMB_version="v8"
 
 for lr in $LRs
@@ -76,7 +76,7 @@ do
             --submit \
             --batch_size 128 \
             --num_workers 8 \
-            --feature_w 0.5 \
+            --feature_w 0 \
             --fcst_w 1.0 \
             --recon_w 0.0 \
             --att_w 0.5 \

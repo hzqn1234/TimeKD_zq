@@ -64,7 +64,8 @@ class KDLoss(nn.Module):
             soft_teacher = torch.sigmoid(torch.logit(prompt_out_clamp) / T)
             soft_student = torch.sigmoid(torch.logit(ts_out_clamp) / T)
             
-            total_loss += self.distill_w * self.distill_loss(soft_student, soft_teacher)
+            # [FIX 2 核心修复]: 补充 (T * T) 梯度补偿系数，防止温度缩放导致梯度极度缩小进而导致 Student 学不到东西
+            total_loss += self.distill_w * self.distill_loss(soft_student, soft_teacher) * (T * T)
 
         # 4. 特征层蒸馏 (Feature targets): Student 特征 vs Teacher 特征
         if self.feature_w > 0:

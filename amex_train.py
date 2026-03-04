@@ -253,7 +253,6 @@ class trainer:
                 print(f"WARNING: Valid Teacher path not provided for Stage 2! ({teacher_path})")
                 
             for param in self.model.input_series_block_n1_t.parameters(): param.requires_grad = False
-            # [新增] 把 Teacher 专属的 Raw 数值特征投影层也冻结
             for param in self.model.input_series_block_n1_t_raw.parameters(): param.requires_grad = False
             for param in self.model.transformer_encoder_t.parameters(): param.requires_grad = False
             for param in self.model.output_block_t.parameters(): param.requires_grad = False
@@ -268,6 +267,13 @@ class trainer:
     def train(self, data):
         self.model.train()
         self.optimizer.zero_grad()
+
+        # [FIX 1 核心修复]: 强制将 Teacher 网络切回评估模式，防止 Dropout 和 BN 破坏预训练好的 Teacher 权重
+        if self.stage == 2:
+            self.model.input_series_block_n1_t.eval()
+            self.model.input_series_block_n1_t_raw.eval()
+            self.model.transformer_encoder_t.eval()
+            self.model.output_block_t.eval()
 
         ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(data)
         y = data['batch_y'].to(self.device)
