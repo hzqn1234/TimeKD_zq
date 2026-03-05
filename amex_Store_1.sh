@@ -2,21 +2,25 @@
 
 #### SBATCH -o gpu-job-%j.output
 #SBATCH -o gpu-job-store-emb-1.output
-#SBATCH -p PA100q
+#SBATCH -p RTXA6Kq
 # SBATCH --gres=gpu:4
 
 #SBATCH -n 1
 #SBATCH -c 24
-#SBATCH -w node02
+#SBATCH -w node09
 
 # Define the specific GPUs you want to use as a space-separated string (NOT an array).
 # You can change this to GPUS="0" to run on a single GPU, or GPUS="0 1 2" for multiple.
-GPUS="5 6 7" 
+GPUS="4 5 6 7" 
 
 # Define parameters as variables so they can be reused for the path
 DATA_TYPE="original"
 SAMPLING="10pct"
-EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/emb_06"
+EMB_VERSION="v8"
+
+V_NUM=$(echo $EMB_VERSION | tr -dc '0-9')
+FORMATTED_VERSION=$(printf "emb_%02d" $V_NUM)
+EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/${FORMATTED_VERSION}"
 echo "Embedding output will be saved to: ${EMB_DIR}"
 
 # === NEW CLEANUP LOGIC ===
@@ -55,6 +59,7 @@ for GPU_ID in $GPUS; do
             --total_chunks $TOTAL_CHUNKS \
             --allow_truncate 0 \
             --l_layers 16 \
+            --emb_version "$EMB_VERSION" \
             > store_emb_1_chunk_${i}.log 2>&1 &
             
     # Capture the PID of the last background command

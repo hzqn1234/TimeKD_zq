@@ -27,6 +27,10 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:150"
 
 def parse_args():
     parser = argparse.ArgumentParser()
+    # ================= 新增阶段控制参数 =================
+    parser.add_argument("--stage", type=int, default=0, help="0: 联合训练, 1: 仅训练Teacher(预训练), 2: 仅训练Student(蒸馏)")
+    parser.add_argument("--teacher_dir", type=str, default="", help="Stage 2需要提供Stage 1训练输出的best models所在目录")
+    # ====================================================
     parser.add_argument("--device", type=str, default="cuda", help="")
     parser.add_argument("--data_path", type=str, default="Amex", help="data path")
     parser.add_argument("--sampling", type=str, default='100pct', help="Sampling ratio")
@@ -48,6 +52,7 @@ def parse_args():
     parser.add_argument("--recon_w", type=float, default=0.5, help="weight of reconstruction loss")
     parser.add_argument("--att_w", type=float, default=0.01, help="weight of attention kd loss")
     parser.add_argument("--distill_w", type=float, default=1.0, help="weight of distillation loss")
+    parser.add_argument("--temperature", type=float, default=5.0, help="Temperature for Soft Label KD")
     parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')
     parser.add_argument("--epochs", type=int, default=10, help="")
     parser.add_argument('--seed', type=int, default=42, help='random seed')
@@ -113,7 +118,6 @@ class Amex_Dataset:
             series = series.reshape((-1,) + series.shape[-1:])
         
         if self.is_train:
-            # 1. 查找 idx 对应的文件和行号
             mapping = self.id_to_file_and_row.get(str(idx))
             
             if mapping is None:
@@ -121,13 +125,11 @@ class Amex_Dataset:
             
             fpath, row_idx = mapping
 
-            # 2. Lazy load and cache HDF5 file handlers per worker process
             if not hasattr(self, 'h5_handlers'):
                 self.h5_handlers = {}
             if fpath not in self.h5_handlers:
                 self.h5_handlers[fpath] = h5py.File(fpath, 'r')
 
-            # 3. Read from the cached handler
             emb_data = self.h5_handlers[fpath]['embeddings'][row_idx]
             emb_tensor = torch.from_numpy(emb_data)
 
@@ -163,8 +165,6 @@ class Amex_Dataset:
                 v = item['LABEL'].astype(np.float32)
                 batch_y[i] = torch.tensor(v).float()
         
-        # --- [FIX APPLIED HERE] ---
-        # Added .float() at the end to automatically cast loaded FP16 tensors back to FP32
         if self.is_train:
             batch_emb_tensor = torch.stack([sample['emb_tensor'] for sample in batch], dim=0).float()
 
@@ -176,19 +176,35 @@ class Amex_Dataset:
                 }
 
 class Criterion:
-    def __init__(self):
+    def __init__(self, stage):
         self.feature_loss = 'smooth_l1'  
         self.fcst_loss = 'bce'
         self.recon_loss = 'bce'
         self.att_loss = 'smooth_l1'   
         self.distill_loss = 'bce'
-        self.fcst_w    = args.fcst_w
-        self.recon_w   = args.recon_w
-        self.feature_w = args.feature_w
-        self.att_w     = args.att_w
-        self.distill_w = args.distill_w
+        
+        if stage == 1:
+            self.fcst_w    = 0.0
+            self.recon_w   = 1.0  
+            self.feature_w = 0.0
+            self.att_w     = 0.0
+            self.distill_w = 0.0
+        elif stage == 2:
+            self.fcst_w    = args.fcst_w
+            self.recon_w   = 0.0  
+            self.feature_w = args.feature_w
+            self.att_w     = args.att_w
+            self.distill_w = args.distill_w
+        else:
+            self.fcst_w    = args.fcst_w
+            self.recon_w   = args.recon_w
+            self.feature_w = args.feature_w
+            self.att_w     = args.att_w
+            self.distill_w = args.distill_w
+
         self.criterion = KDLoss(self.feature_loss, self.fcst_loss, self.recon_loss, self.att_loss, self.distill_loss,
-                                self.feature_w,  self.fcst_w,  self.recon_w,  self.att_w, self.distill_w
+                                self.feature_w,  self.fcst_w,  self.recon_w,  self.att_w, self.distill_w,
+                                temperature=args.temperature
                                 )
 
 class trainer:
@@ -206,51 +222,87 @@ class trainer:
         lrate,
         wdecay,
         device,
-        epochs
+        epochs,
+        stage=0,
+        teacher_path=None
     ):
         self.MSE = MSE
         self.MAE = MAE
         self.clip = 5
         self.scaler = scaler
         self.device = device
+        self.stage = stage
         self.criterion = criterion.criterion
 
         self.model = Amodel(223, 16, 1, 3, 128, d_llm=d_llm, device=self.device)
         self.model.to(self.device)
 
-        print("The number of parameters: {}".format(self.model.param_num()))
+        if stage == 1:
+            print("\n=== Stage 1: Freezing Student, Training Teacher ===")
+            for param in self.model.input_series_block_n1.parameters(): param.requires_grad = False
+            for param in self.model.transformer_encoder.parameters(): param.requires_grad = False
+            for param in self.model.output_block.parameters(): param.requires_grad = False
+        elif stage == 2:
+            print("\n=== Stage 2: Freezing Teacher, Training Student ===")
+            if teacher_path and os.path.exists(teacher_path):
+                self.model.load_state_dict(torch.load(teacher_path, map_location=self.device), strict=False)
+                print(f"Loaded Teacher pre-trained weights from: {teacher_path}")
+            elif teacher_path is None:
+                print("Test/Predict phase initialized (Teacher weights will be loaded with the whole model).")
+            else:
+                print(f"WARNING: Valid Teacher path not provided for Stage 2! ({teacher_path})")
+                
+            for param in self.model.input_series_block_n1_t.parameters(): param.requires_grad = False
+            for param in self.model.input_series_block_n1_t_raw.parameters(): param.requires_grad = False
+            for param in self.model.transformer_encoder_t.parameters(): param.requires_grad = False
+            for param in self.model.output_block_t.parameters(): param.requires_grad = False
 
-        self.optimizer = optim.AdamW(self.model.parameters(), lr=lrate, weight_decay=wdecay)
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        print("The number of trainable parameters: {}".format(trainable_params))
+
+        optim_params = [p for p in self.model.parameters() if p.requires_grad]
+        self.optimizer = optim.AdamW(optim_params, lr=lrate, weight_decay=wdecay)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=min(epochs, 100), eta_min=1e-8)
 
     def train(self, data):
         self.model.train()
         self.optimizer.zero_grad()
+
+        # [FIX 1 核心修复]: 强制将 Teacher 网络切回评估模式，防止 Dropout 和 BN 破坏预训练好的 Teacher 权重
+        if self.stage == 2:
+            self.model.input_series_block_n1_t.eval()
+            self.model.input_series_block_n1_t_raw.eval()
+            self.model.transformer_encoder_t.eval()
+            self.model.output_block_t.eval()
+
         ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(data)
-        y = data['batch_y'].to(device)
+        y = data['batch_y'].to(self.device)
         
         if data['batch_series'].shape[0] == 1:
-            y =  torch.tensor([y])
+            y =  torch.tensor([y]).to(self.device)
         
         loss = self.criterion(ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att, y)
         loss.backward()
         if self.clip is not None:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip) 
         self.optimizer.step() 
-        return loss.item(), ts_out
+        
+        out_metric = prompt_out if self.stage == 1 else ts_out
+        return loss.item(), out_metric
 
     def eval(self, data):
         self.model.eval()
 
         with torch.no_grad():
             ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(data)
-            y = data['batch_y'].to(device)
+            y = data['batch_y'].to(self.device)
 
             if data['batch_series'].shape[0] == 1:
-                y =  torch.tensor([y])
+                y =  torch.tensor([y]).to(self.device)
 
             loss = self.criterion(ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att, y)
-        return loss.item(), ts_out
+            out_metric = prompt_out if self.stage == 1 else ts_out
+        return loss.item(), out_metric
 
 
 def seed_it(seed):
@@ -267,14 +319,13 @@ def seed_it(seed):
 args = parse_args()
 INPUT_PATH  = f'../../000_data/amex/{args.data_type}_{args.sampling}'
 
-if args.emb_version == 'v4':
-    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_04/'
-elif args.emb_version == 'v5':
-    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_05/'
-elif args.emb_version == 'v6':
-    emb_path    = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_06/'
+# 自动解析提取数字并补零 (例如 'v7' -> '7' -> '07')
+if args.emb_version and args.emb_version.startswith('v') and args.emb_version[1:].isdigit():
+    v_num = args.emb_version[1:].zfill(2) 
+    emb_path = f'{INPUT_PATH}/emb_{v_num}/'
 else:
     emb_path = None
+
 
 print(f'INPUT_PATH: {INPUT_PATH}')
 print(f'emb_path: {emb_path}')
@@ -282,10 +333,10 @@ print(f'emb_path: {emb_path}')
 seed_it(args.seed)
 device = torch.device(args.device)
 
-model_specs_template =    "{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}_{args.batch_size}_{args.es_patience}" \
+model_specs_template =    "S{args.stage}_{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}_{args.batch_size}_{args.es_patience}" \
                        +  "_{args.channel}_{args.e_layer}_{args.dropout_n}" \
                        +  "_{args.feature_w}_{args.fcst_w}_{args.recon_w}_{args.att_w}_{args.distill_w}"
-model_specs          =   f"{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}_{args.batch_size}_{args.es_patience}" \
+model_specs          =   f"S{args.stage}_{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}_{args.batch_size}_{args.es_patience}" \
                        + f"_{args.channel}_{args.e_layer}_{args.dropout_n}" \
                        + f"_{args.feature_w}_{args.fcst_w}_{args.recon_w}_{args.att_w}_{args.distill_w}"
 model_path = os.path.join(args.save, args.data_path, model_specs, '')
@@ -297,7 +348,7 @@ if not os.path.exists(model_path):
 
 print(args)
 
-criterion = Criterion()
+criterion = Criterion(args.stage)
 
 def main_train():
     train_start_time = datetime.now()
@@ -313,6 +364,13 @@ def main_train():
         fold_train_start_time =  datetime.now()
         print(f"Start training... Fold {fold_index} at {fold_train_start_time}")
 
+        teacher_model_path = None
+        if args.stage == 2:
+            if args.teacher_dir:
+                teacher_model_path = os.path.join(args.teacher_dir, f"best_model_fold_{fold_index}.pth")
+            else:
+                raise ValueError("Stage 2 必须提供 --teacher_dir 参数！")
+
         engine = trainer(
             scaler=StandardScaler,
             channel=args.channel,
@@ -326,7 +384,9 @@ def main_train():
             lrate=args.lrate,
             wdecay=args.weight_decay,
             device=device,
-            epochs=args.epochs
+            epochs=args.epochs,
+            stage=args.stage,
+            teacher_path=teacher_model_path
         )
 
         train_dataset = Amex_Dataset(trainval_series, [trainval_series_idx[i] for i in trn_index], trainval_y)
@@ -361,7 +421,6 @@ def main_train():
             log = "Epoch: {:03d}, Training Time: {:.4f} secs"
             print(log.format(i, (t2 - t1)))
 
-            # Validation
             val_loss = []
             val_outputs = []
             val_ys = []
@@ -381,7 +440,6 @@ def main_train():
             log = "Epoch: {:03d}, Validation Time: {:.4f} secs"
             print(log.format(i, (s2 - s1)))
         
-            # calculate train metrics
             train_pre = torch.cat(train_outputs, dim=0)
             train_y = torch.cat(train_ys, dim=0)
             train_real = torch.Tensor(train_y).to(device).float()
@@ -391,7 +449,6 @@ def main_train():
             train_score = metric(pred.detach(), real.detach())
             print(f'train_score: {train_score}')
 
-            # calculate val metrics
             val_pre = torch.cat(val_outputs, dim=0)
             val_y = torch.cat(val_ys, dim=0)
             val_real = torch.Tensor(val_y).to(device).float()
@@ -401,7 +458,6 @@ def main_train():
             val_score = metric(pred.detach(), real.detach())
             print(f'val_score: {val_score}')
 
-            # Log loss
             mtrain_loss = np.mean(train_loss)
             mvalid_loss = np.mean(val_loss)
 
@@ -440,7 +496,6 @@ def main_train():
         print(f"The epoch of the best result：{bestid}")
         print(f"The valid loss of the best model {str(round(his_loss[bestid - 1], 4))} \n", )
     
-        # output train result to log file
         log_df = create_log_df()
         log_df['fold_index'] = [fold_index]
         log_df['amex_metric'] = [f"{best_score[0]:.6g}"]
@@ -494,7 +549,9 @@ def main_test(is_predict=False):
             lrate=args.lrate,
             wdecay=args.weight_decay,
             device=device,
-            epochs=args.epochs
+            epochs=args.epochs,
+            stage=args.stage,
+            teacher_path=None  
         )
         
         model = engine.model
@@ -506,9 +563,18 @@ def main_test(is_predict=False):
     for _, data in enumerate(tqdm(test_dataloader)):
         with torch.no_grad():
             if data['batch_series'].shape[0] == 1:
+                # [提分彩蛋]: m(data)[2] 是Student, m(data)[3] 是Teacher
+                # 这里默认保留Student输出。如果您想做融合 Ensemble 提分，
+                # 可以改成: pred_teacher = torch.tensor([torch.stack([m(data)[3] for m in models], 0).mean(0)]).to(device)
                 pred_y = torch.tensor([torch.stack([m(data)[2] for m in models], 0).mean(0)]).to(device)
             else:
                 pred_y = torch.stack([m(data)[2] for m in models], 0).mean(0)
+                
+                # [提分彩蛋]: Teacher 模型融合代码示例：
+                # pred_student = torch.stack([m(data)[2] for m in models], 0).mean(0)
+                # pred_teacher = torch.stack([m(data)[3] for m in models], 0).mean(0)
+                # pred_y = (pred_student * 0.4) + (pred_teacher * 0.6)
+                
         test_outputs.append(pred_y)
 
     print(pred_y.shape)
@@ -531,7 +597,6 @@ def main_test(is_predict=False):
     print(f"Testing ends at {test_end_time}")
     print(f"Total test time spent: {test_duration}") 
 
-    # output test result to log file
     log_df = create_log_df()
     log_df['is_predict'] = [is_predict]
     if not is_predict:
@@ -549,6 +614,7 @@ def main_test(is_predict=False):
 
 def create_log_df():
     log_df = pd.DataFrame()
+    log_df['stage'] = [args.stage]
     log_df['model_specs'] = [model_specs]
     log_df['log_time'] = [datetime.now().strftime('%Y-%m-%d %H:%M:%S')] 
     log_df['feature_w'] = [args.feature_w]
@@ -586,20 +652,28 @@ if __name__ == "__main__":
         main_train()      
 
     if args.test:
-        if args.data_type == 'original' and args.sampling == '100pct':
+        if args.stage == 1:
+            print('>>> 跳过测试: Stage 1 为Teacher预训练，无法在没有 Embedding 的 Test 集上进行推理。')
+        elif args.data_type == 'original' and args.sampling == '100pct':
             print('Skip Test for orginal_100pct')
             pass
         else:
             main_test()
 
     if args.predict:
-        log_df = main_test(is_predict=True)
+        if args.stage == 1:
+            print('>>> 跳过预测: Stage 1 为Teacher预训练，无法在没有 Embedding 的 Test 集上进行预测。')
+        else:
+            log_df = main_test(is_predict=True)
 
     if args.submit:
-        if log_df is not None:
-            submit_message = log_df.to_json(orient='records')
+        if args.stage == 1:
+            print('>>> 跳过提交: 无法提交 Stage 1 的Teacher模型预测结果。')
         else:
-            submit_message = f'{model_specs_template}: {model_specs}'
-        os.system(f"""kaggle competitions submit -c amex-default-prediction -f {model_path}/submission.csv.zip -m '{submit_message}'""")
-        print("\n")
-        pass
+            if log_df is not None:
+                submit_message = log_df.to_json(orient='records')
+            else:
+                submit_message = f'{model_specs_template}: {model_specs}'
+            os.system(f"""kaggle competitions submit -c amex-default-prediction -f {model_path}/submission.csv.zip -m '{submit_message}'""")
+            print("\n")
+            pass
