@@ -9,7 +9,7 @@
 
 GPU_ID=2
 SAMPLING="1pct"
-LRs="1e-4"
+LRs="1e-3"
 EMB_version="v8"
 
 for lr in $LRs
