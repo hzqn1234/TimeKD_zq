@@ -27,10 +27,8 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:150"
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    # ================= 新增阶段控制参数 =================
     parser.add_argument("--stage", type=int, default=0, help="0: 联合训练, 1: 仅训练Teacher(预训练), 2: 仅训练Student(蒸馏)")
     parser.add_argument("--teacher_dir", type=str, default="", help="Stage 2需要提供Stage 1训练输出的best models所在目录")
-    # ====================================================
     parser.add_argument("--device", type=str, default="cuda", help="")
     parser.add_argument("--data_path", type=str, default="Amex", help="data path")
     parser.add_argument("--sampling", type=str, default='100pct', help="Sampling ratio")
@@ -87,10 +85,9 @@ class Amex_Dataset:
         self.id_name = id_name
         self.is_train = df_y is not None
         
-        # [V6 优化] 支持多个 Chunk 的查找表
         if self.is_train:
             chunk_files = glob.glob(os.path.join(emb_path, "train_embeddings_chunk_*.h5"))
-            if not chunk_files: # Fallback backwards compatibility
+            if not chunk_files:
                 chunk_files = [os.path.join(emb_path, "train_embeddings_all.h5")]
                 
             self.id_to_file_and_row = {}
@@ -178,9 +175,11 @@ class Amex_Dataset:
 class Criterion:
     def __init__(self, stage):
         self.feature_loss = 'smooth_l1'  
-        self.fcst_loss = 'bce'
-        self.recon_loss = 'bce'
+        # [FIX] 预测和重构改为基于 Logit 的 BCE
+        self.fcst_loss = 'bce_logits'
+        self.recon_loss = 'bce_logits'
         self.att_loss = 'smooth_l1'   
+        # 蒸馏损失仍然用 bce，因为我们在 KDLoss 里面做了 Sigmoid 转换
         self.distill_loss = 'bce'
         
         if stage == 1:
@@ -268,7 +267,6 @@ class trainer:
         self.model.train()
         self.optimizer.zero_grad()
 
-        # [FIX 1 核心修复]: 强制将 Teacher 网络切回评估模式，防止 Dropout 和 BN 破坏预训练好的 Teacher 权重
         if self.stage == 2:
             self.model.input_series_block_n1_t.eval()
             self.model.input_series_block_n1_t_raw.eval()
@@ -319,7 +317,6 @@ def seed_it(seed):
 args = parse_args()
 INPUT_PATH  = f'../../000_data/amex/{args.data_type}_{args.sampling}'
 
-# 自动解析提取数字并补零 (例如 'v7' -> '7' -> '07')
 if args.emb_version and args.emb_version.startswith('v') and args.emb_version[1:].isdigit():
     v_num = args.emb_version[1:].zfill(2) 
     emb_path = f'{INPUT_PATH}/emb_{v_num}/'
@@ -440,7 +437,8 @@ def main_train():
             train_y = torch.cat(train_ys, dim=0)
             train_real = torch.Tensor(train_y).to(device).float()
 
-            pred = train_pre.squeeze().to(device)
+            # [FIX] 因为网络输出的是 Logits，计算分数前必须过一个 Sigmoid
+            pred = torch.sigmoid(train_pre.squeeze()).to(device)
             real = train_real.to(device)
             train_score = metric(pred.detach(), real.detach())
             print(f'train_score: {train_score}')
@@ -449,7 +447,8 @@ def main_train():
             val_y = torch.cat(val_ys, dim=0)
             val_real = torch.Tensor(val_y).to(device).float()
 
-            pred = val_pre.squeeze().to(device)
+            # [FIX] 因为网络输出的是 Logits，计算分数前必须过一个 Sigmoid
+            pred = torch.sigmoid(val_pre.squeeze()).to(device)
             real = val_real.to(device)
             val_score = metric(pred.detach(), real.detach())
             print(f'val_score: {val_score}')
@@ -559,23 +558,17 @@ def main_test(is_predict=False):
     for _, data in enumerate(tqdm(test_dataloader)):
         with torch.no_grad():
             if data['batch_series'].shape[0] == 1:
-                # [提分彩蛋]: m(data)[2] 是Student, m(data)[3] 是Teacher
-                # 这里默认保留Student输出。如果您想做融合 Ensemble 提分，
-                # 可以改成: pred_teacher = torch.tensor([torch.stack([m(data)[3] for m in models], 0).mean(0)]).to(device)
                 pred_y = torch.tensor([torch.stack([m(data)[2] for m in models], 0).mean(0)]).to(device)
             else:
                 pred_y = torch.stack([m(data)[2] for m in models], 0).mean(0)
-                
-                # [提分彩蛋]: Teacher 模型融合代码示例：
-                # pred_student = torch.stack([m(data)[2] for m in models], 0).mean(0)
-                # pred_teacher = torch.stack([m(data)[3] for m in models], 0).mean(0)
-                # pred_y = (pred_student * 0.4) + (pred_teacher * 0.6)
                 
         test_outputs.append(pred_y)
 
     print(pred_y.shape)
     test_pre = torch.cat(test_outputs, dim=0)
-    pred = test_pre.squeeze().to(device)
+    
+    # [FIX] 因为各折输出的是 Logits 并取了平均，生成真实概率前必须过一个 Sigmoid
+    pred = torch.sigmoid(test_pre.squeeze()).to(device)
     
     if not is_predict:
         test_real = torch.Tensor(test_y).to(device).float()
