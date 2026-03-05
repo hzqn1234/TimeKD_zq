@@ -333,12 +333,8 @@ print(f'emb_path: {emb_path}')
 seed_it(args.seed)
 device = torch.device(args.device)
 
-model_specs_template =    "S{args.stage}_{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}_{args.batch_size}_{args.es_patience}" \
-                       +  "_{args.channel}_{args.e_layer}_{args.dropout_n}" \
-                       +  "_{args.feature_w}_{args.fcst_w}_{args.recon_w}_{args.att_w}_{args.distill_w}"
-model_specs          =   f"S{args.stage}_{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}_{args.batch_size}_{args.es_patience}" \
-                       + f"_{args.channel}_{args.e_layer}_{args.dropout_n}" \
-                       + f"_{args.feature_w}_{args.fcst_w}_{args.recon_w}_{args.att_w}_{args.distill_w}"
+model_specs_template =    "S{args.stage}_{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}" 
+model_specs          =   f"S{args.stage}_{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}" 
 model_path = os.path.join(args.save, args.data_path, model_specs, '')
 
 print(f'model_specs: {model_specs}')

@@ -5,9 +5,9 @@
 #SBATCH --gpus-per-node=1
 #SBATCH -n 1
 #SBATCH -c 8
-#SBATCH -w node09
+#SBATCH -w node16
 
-GPU_ID=7
+GPU_ID=5
 SAMPLING="100pct"
 LRs="1e-4"
 EMB_version="v8"
@@ -81,6 +81,7 @@ do
             --recon_w 0.0 \
             --att_w 0.5 \
             --distill_w 1.0 \
+            --temperature 1.0 \
             --emb_version "$EMB_version" \
             --remark "Stage 2 Distillation" \
             --epochs 20 

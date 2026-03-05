@@ -7,9 +7,9 @@
 #SBATCH -c 8
 #SBATCH -w node16
 
-GPU_ID=2
+GPU_ID=6
 SAMPLING="10pct"
-LRs="2e-4 5e-4"
+LRs="2e-4"
 EMB_version="v8"
 
 for lr in $LRs
@@ -81,6 +81,7 @@ do
             --recon_w 0.0 \
             --att_w 0.5 \
             --distill_w 1.0 \
+            --temperature 1.0 \
             --emb_version "$EMB_version" \
             --remark "Stage 2 Distillation" \
             --epochs 20 
