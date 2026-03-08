@@ -223,7 +223,8 @@ class trainer:
         device,
         epochs,
         stage=0,
-        teacher_path=None
+        teacher_path=None,
+        is_training=True
     ):
         self.MSE = MSE
         self.MAE = MAE
@@ -237,19 +238,24 @@ class trainer:
         self.model.to(self.device)
 
         if stage == 1:
-            print("\n=== Stage 1: Freezing Student, Training Teacher ===")
+            if is_training:
+                print("\n=== Stage 1: Freezing Student, Training Teacher ===")
             for param in self.model.input_series_block_n1.parameters(): param.requires_grad = False
             for param in self.model.transformer_encoder.parameters(): param.requires_grad = False
             for param in self.model.output_block.parameters(): param.requires_grad = False
         elif stage == 2:
-            print("\n=== Stage 2: Freezing Teacher, Training Student ===")
+            if is_training:
+                print("\n=== Stage 2: Freezing Teacher, Training Student ===")
             if teacher_path and os.path.exists(teacher_path):
                 self.model.load_state_dict(torch.load(teacher_path, map_location=self.device), strict=False)
-                print(f"Loaded Teacher pre-trained weights from: {teacher_path}")
+                if is_training:
+                    print(f"Loaded Teacher pre-trained weights from: {teacher_path}")
             elif teacher_path is None:
-                print("Test/Predict phase initialized (Teacher weights will be loaded with the whole model).")
+                if is_training:
+                    print("Test/Predict phase initialized (Teacher weights will be loaded with the whole model).")
             else:
-                print(f"WARNING: Valid Teacher path not provided for Stage 2! ({teacher_path})")
+                if is_training:
+                    print(f"WARNING: Valid Teacher path not provided for Stage 2! ({teacher_path})")
                 
             for param in self.model.input_series_block_n1_t.parameters(): param.requires_grad = False
             for param in self.model.input_series_block_n1_t_raw.parameters(): param.requires_grad = False
@@ -257,7 +263,8 @@ class trainer:
             for param in self.model.output_block_t.parameters(): param.requires_grad = False
 
         trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        print("The number of trainable parameters: {}".format(trainable_params))
+        if is_training:
+            print("The number of trainable parameters: {}".format(trainable_params))
 
         optim_params = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = optim.AdamW(optim_params, lr=lrate, weight_decay=wdecay)
@@ -380,7 +387,8 @@ def main_train():
             device=device,
             epochs=args.epochs,
             stage=args.stage,
-            teacher_path=teacher_model_path
+            teacher_path=teacher_model_path,
+            is_training=True
         )
 
         train_dataset = Amex_Dataset(trainval_series, [trainval_series_idx[i] for i in trn_index], trainval_y)
@@ -567,7 +575,8 @@ def main_test(is_predict=False):
             device=device,
             epochs=args.epochs,
             stage=args.stage,
-            teacher_path=None  
+            teacher_path=None,
+            is_training=False
         )
         
         model = engine.model
