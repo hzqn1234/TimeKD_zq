@@ -1,15 +1,15 @@
 #!/bin/sh
 
 #SBATCH -o gpu-job-train-3.output
-#SBATCH -p PA100q
+#SBATCH -p RTXA6Kq
 #SBATCH --gpus-per-node=1
 #SBATCH -n 1
 #SBATCH -c 8
-#SBATCH -w node05
+#SBATCH -w node16
 
-GPU_ID=2
-SAMPLING="1pct"
-LRs="1e-3"
+GPU_ID=0
+SAMPLING="100pct"
+LRs="1e-3 5e-4 1e-4 5e-5"
 EMB_version="v8"
 
 for lr in $LRs
@@ -83,7 +83,7 @@ do
             --distill_w 1.0 \
             --temperature 5.0 \
             --emb_version "$EMB_version" \
-            --remark "Stage 2 Distillation" \
+            --remark "Stage 2 Distillation, shift sigmoid" \
             --epochs 20 
     done
 done

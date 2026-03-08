@@ -262,7 +262,7 @@ def parse_args():
     parser.add_argument("--total_chunks", type=int, default=1)
     
     # [新增] 接收外部传入的 emb_version 参数
-    parser.add_argument("--emb_version", type=str, default="v7") 
+    parser.add_argument("--emb_version", type=str, default="v8") 
 
     return parser.parse_args()
 
