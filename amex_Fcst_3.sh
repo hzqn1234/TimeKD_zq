@@ -48,7 +48,7 @@ do
             
         # 动态获取最新的 Stage 1 保存目录作为 Teacher 模型路径
         # 确保自动捕获含有best_model的准确路径
-        TEACHER_DIR=$(ls -td ./logs/Amex/S1_* | head -1)
+        TEACHER_DIR="./logs/Amex/S1_original_${SAMPLING}_${lr}_${seed}"
         
         echo ""
         echo "=> Teacher models generated at: $TEACHER_DIR"

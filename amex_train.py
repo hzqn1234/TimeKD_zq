@@ -38,7 +38,7 @@ def parse_args():
     parser.add_argument("--seq_len", type=int, default=13, help="seq_len")
     parser.add_argument("--pred_len", type=int, default=1, help="out_len")
     parser.add_argument("--batch_size", type=int, default=4, help="batch size")
-    parser.add_argument("--lrate", type=float, default=1e-5, help="learning rate")
+    parser.add_argument("--lrate", type=str, default=1e-5, help="learning rate")
     parser.add_argument("--dropout_n", type=float, default=0.2, help="dropout rate of neural network layers")
     parser.add_argument("--d_llm", type=int, default=896, help="hidden dimensions")
     parser.add_argument("--e_layer", type=int, default=1, help="layers of transformer encoder")
@@ -353,6 +353,7 @@ def main_train():
     trainval_y = pd.read_csv(f'{input_path}/train_labels.csv')
 
     skf = StratifiedKFold(n_splits=args.kfold, shuffle=True, random_state=args.seed)
+    fold_best_scores = []  # 用于存储每一折的 best_score
     for fold_index, (trn_index, val_index) in enumerate(skf.split(trainval_y, trainval_y['target'])):
         fold_train_start_time =  datetime.now()
         print(f"Start training... Fold {fold_index} at {fold_train_start_time}")
@@ -374,7 +375,7 @@ def main_train():
             d_llm=args.d_llm,
             e_layer=args.e_layer,
             head=args.head,
-            lrate=args.lrate,
+            lrate=float(args.lrate),
             wdecay=args.weight_decay,
             device=device,
             epochs=args.epochs,
@@ -490,6 +491,9 @@ def main_train():
         print(f"Total train time spent for fold {fold_index}: {fold_train_duration}")
         print(f"The epoch of the best result：{bestid}")
         print(f"The valid loss of the best model {str(round(his_loss[bestid - 1], 4))} \n", )
+        print(f"The valid metric of the best model (Amex Metric, AUC): {best_score[0]:.6g}, {best_score[1]:.6g} \n")
+
+        fold_best_scores.append(best_score) # 将当前折的最佳分数存入列表
     
         log_df = create_log_df()
         log_df['fold_index'] = [fold_index]
@@ -505,6 +509,23 @@ def main_train():
     train_duration = train_end_time - train_start_time
     print(f"Training ends at {train_end_time}")
     print(f"Total train time spent for all folds: {train_duration} \n")    
+
+    # <--- 统一打印所有折的结果并计算平均值 --->
+    print("================ Summary of All Folds ================")
+    avg_amex = 0.0
+    avg_auc = 0.0
+    for idx, score in enumerate(fold_best_scores):
+        print(f"Fold {idx} - Amex Metric: {score[0]:.6g}, AUC: {score[1]:.6g}")
+        avg_amex += score[0]
+        avg_auc += score[1]
+    
+    if len(fold_best_scores) > 0:
+        avg_amex /= len(fold_best_scores)
+        avg_auc /= len(fold_best_scores)
+        print("------------------------------------------------------")
+        print(f"Average - Metric: {avg_amex:.6g}, AUC: {avg_auc:.6g}")
+    print("======================================================\n")
+    # <--- 打印结束 --->
     return log_df
 
 
@@ -541,7 +562,7 @@ def main_test(is_predict=False):
             d_llm=args.d_llm,
             e_layer=args.e_layer,
             head=args.head,
-            lrate=args.lrate,
+            lrate=float(args.lrate),
             wdecay=args.weight_decay,
             device=device,
             epochs=args.epochs,
