@@ -1,7 +1,6 @@
 #!/bin/sh
 
-#### SBATCH -o gpu-job-%j.output
-#SBATCH -o gpu-job-store-emb-1.output
+#SBATCH -o gpu-job-store-emb-1_test.output
 #SBATCH -p RTXA6Kq
 # SBATCH --gres=gpu:4
 
@@ -15,7 +14,7 @@ GPUS="0 1 2 3 4"
 
 # Define parameters as variables so they can be reused for the path
 DATA_TYPE="original"
-SAMPLING="10pct"
+SAMPLING="100pct"
 EMB_VERSION="v8"
 
 V_NUM=$(echo $EMB_VERSION | tr -dc '0-9')
@@ -24,9 +23,9 @@ EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/${FORMATTED_VERSION}"
 echo "Embedding output will be saved to: ${EMB_DIR}"
 
 # === NEW CLEANUP LOGIC ===
-echo "Ensuring directory exists and clearing previous embedding files in ${EMB_DIR}..."
+echo "Ensuring directory exists and clearing previous test embedding files in ${EMB_DIR}..."
 mkdir -p "$EMB_DIR"
-rm -f "$EMB_DIR"/*.h5
+rm -f "$EMB_DIR"/test_*.h5
 # =========================
 
 # Calculate the total number of chunks by counting the items in the GPUS string
@@ -60,7 +59,8 @@ for GPU_ID in $GPUS; do
             --allow_truncate 0 \
             --l_layers 16 \
             --emb_version "$EMB_VERSION" \
-            > store_emb_1_chunk_${i}.log 2>&1 &
+            --train_test "test" \
+            > store_emb_1_test_chunk_${i}.log 2>&1 &
             
     # Capture the PID of the last background command
     PID=$!
@@ -86,6 +86,6 @@ if [ $FAILED -ne 0 ]; then
     echo "FAILED: One or more embedding chunks failed. Please check the individual log files."
     exit 1
 else
-    echo "SUCCESS: All $TOTAL_CHUNKS train embedding chunks finished successfully!"
+    echo "SUCCESS: All $TOTAL_CHUNKS test embedding chunks finished successfully!"
     exit 0
 fi

@@ -8,7 +8,7 @@
 #SBATCH -w node16
 
 GPU_ID=0
-SAMPLING="10pct"
+SAMPLING="100pct"
 LRs="1e-3 5e-4 1e-4 5e-5"
 EMB_version="v8"
 
