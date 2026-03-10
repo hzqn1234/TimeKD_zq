@@ -1,6 +1,5 @@
 print("Starting amex_store_emb.py...")
 import os
-# [关键] 防止 Tokenizer 并行导致的 CPU 死锁
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 print("Environment set: TOKENIZERS_PARALLELISM = false")
 
@@ -9,7 +8,7 @@ import time
 import math
 import h5py
 import argparse
-import warnings # [新增] 导入 warnings 模块用于触发截断警告
+import warnings 
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 
@@ -38,25 +37,20 @@ class Amex_Dataset:
         print(f"Allow Truncate Strategy: {self.allow_truncate}")
         print("Pre-computing static token IDs & Feature Metadata...")
         
-        # --- 缓存优化 & 完整的角色扮演 Prompt ---
         intro_text = (
             "Credit Risk Expert Analysis.\n"
             "Task: Assess default probability based on monthly financial statements.\n"
             "Categories: Delinquency(D), Spend(S), Payment(P), Balance(B), Risk(R).\n"
             "Data Report:\n"
         )
-        self.id_gt_intro = self.tokenizer.encode(intro_text, add_special_tokens=False)
-        self.id_hd_intro = self.tokenizer.encode(intro_text, add_special_tokens=False)
-        
+        self.id_intro = self.tokenizer.encode(intro_text, add_special_tokens=False)
         self.id_mid = self.tokenizer.encode("\n", add_special_tokens=False)
-        self.id_suffix_gt = self.tokenizer.encode("\nGround Truth Label (1=Default): ", add_special_tokens=False)
         
-        # 推理引导后缀
-        suffix_hd_text = (
+        suffix_text = (
             "\nBased on the data profile shown above, "
             "analyze the repayment behavior. Predicted Default Risk:"
         )
-        self.id_suffix_hd = self.tokenizer.encode(suffix_hd_text, add_special_tokens=False)
+        self.id_suffix = self.tokenizer.encode(suffix_text, add_special_tokens=False)
         
         unique_dates = self.df_series['S_2'].unique()
         self.date_cache = {}
@@ -64,9 +58,8 @@ class Amex_Dataset:
             self.date_cache[d] = self.tokenizer.encode(f"Time: {str(d)}", add_special_tokens=False)
         self.pad_date_id = self.tokenizer.encode("Padding", add_special_tokens=False)
 
-        self.base_overhead = len(self.id_gt_intro) + len(self.id_mid) + len(self.id_suffix_gt) + 5
+        self.base_overhead = len(self.id_intro) + len(self.id_mid) + len(self.id_suffix) + 5
         
-        # --- 特征语义化映射逻辑 ---
         PREFIX_MAP = {
             'D': 'Delinquency', 'S': 'Spend', 'P': 'Payment', 
             'B': 'Balance', 'R': 'Risk'
@@ -93,7 +86,7 @@ class Amex_Dataset:
                     category = PREFIX_MAP.get(prefix, 'Other')
                     self.feature_meta.append({'type': 'numeric', 'name': name, 'semantic_cat': category})
                     
-        print("Dataset initialization complete.")
+        print("Dataset initialization complete (Single-Stream Optimized Version).")
 
     def __len__(self):
         return (len(self.uidxs))
@@ -103,13 +96,10 @@ class Amex_Dataset:
             date_ids = self.date_cache.get(time_val, self.pad_date_id)
         else:
             date_ids = self.pad_date_id
-        
-        y_label_ids = self.tokenizer.encode(str(int(y_val)), add_special_tokens=False)
 
-        reserved_tokens = self.base_overhead + len(date_ids) + len(y_label_ids)
+        reserved_tokens = self.base_overhead + len(date_ids)
         available_tokens = self.max_len - reserved_tokens
         
-        # --- v5 的区块化拼接逻辑 (Hierarchical Grouping) ---
         if self.feature_names is not None and len(self.feature_names) == len(feats_vals):
             grouped_lines = { 'Delinquency': [], 'Spend': [], 'Payment': [], 'Balance': [], 'Risk': [], 'Other': [] }
             
@@ -118,25 +108,20 @@ class Amex_Dataset:
                 if cat_key not in grouped_lines: cat_key = 'Other'
                 
                 line_str = ""
-                # [修改] 优化后的逻辑：只输出激活的类别，极其节省 Token，且符合自然语言直觉
                 if meta['type'] == 'onehot':
                     if val > 0.5:
-                        # 只在值为 1 时输出，例如 "D_68: Type 1"
                         line_str = f"{meta['orig_name']}: Type {meta['cat_val']}"
                 else:
-                    # 连续特征的趋势计算处理
                     val_str = f"{val:.2f}"
                     trend_str = ""
                     
                     if prev_vals is not None:
                         prev = prev_vals[idx]
                         diff = val - prev
-                        # 启发式规则：只关注大于 0.01 的有意义变化
                         if abs(diff) > 0.01:
                             direction = "↑" if diff > 0 else "↓"
                             trend_str = f" ({direction}{abs(diff):.2f})"
                     
-                    # 拼接结果，例如 "Spend_1: 0.00" 或 "Spend_1: 0.05 (↑0.05)"
                     line_str = f"{meta['name']}: {val_str}{trend_str}"
 
                 if line_str:
@@ -152,34 +137,25 @@ class Amex_Dataset:
             
             vals_str = "\n".join(sections)
         else:
-            # 极速构建策略的回退方案
             vals_list = [f"{v:.2f}" for v in feats_vals]
             vals_str = " ".join(vals_list)
-        # -----------------------------------------------------------
 
         vals_ids = self.tokenizer.encode(vals_str, add_special_tokens=False)
         
-        # [新增] 计算未截断前的真实最大 Token 长度
-        raw_gt_len = len(self.id_gt_intro) + len(date_ids) + len(self.id_mid) + len(vals_ids) + len(self.id_suffix_gt) + len(y_label_ids)
-        raw_hd_len = len(self.id_hd_intro) + len(date_ids) + len(self.id_mid) + len(vals_ids) + len(self.id_suffix_hd)
-        raw_max_len = max(raw_gt_len, raw_hd_len)
+        raw_len = len(self.id_intro) + len(date_ids) + len(self.id_mid) + len(vals_ids) + len(self.id_suffix)
         
-        # [修改] 强制截断丢失的控制逻辑
         if len(vals_ids) > available_tokens:
             if self.allow_truncate:
-                warnings.warn(f"\n[Warning] Token limit exceeded! Required: {raw_max_len}, Max: {self.max_len}. "
+                warnings.warn(f"\n[Warning] Token limit exceeded! Required: {raw_len}, Max: {self.max_len}. "
                               f"Truncating features to fit. Tail information will be lost.")
                 vals_ids = vals_ids[:available_tokens]
             else:
-                # 不允许截断，保留完整长度 (可能会导致后续 forward_tokenized 报 OOM 或索引越界)
                 pass
 
-        gt_seq = (self.id_gt_intro + date_ids + self.id_mid + 
-                  vals_ids + self.id_suffix_gt + y_label_ids)
-        hd_seq = (self.id_hd_intro + date_ids + self.id_mid + 
-                  vals_ids + self.id_suffix_hd)
+        seq = (self.id_intro + date_ids + self.id_mid + 
+               vals_ids + self.id_suffix)
         
-        return gt_seq, hd_seq, raw_max_len # [新增] 返回真实的 token 长度
+        return seq, raw_len
 
     def __getitem__(self, index):
         i1, i2, idx = self.uidxs[index]
@@ -193,70 +169,55 @@ class Amex_Dataset:
         if self.df_y is not None:
             label = self.df_y.at[idx, self.label_name]
         
-        gt_ids_list = []
-        hd_ids_list = []
-        sample_raw_max = 0 # [新增] 记录本样本13个时间步中最长的 raw_len
+        ids_list = []
+        sample_raw_max = 0 
         
         seq_len = 13
         valid_len = len(time_ref)
         
         for t in range(seq_len):
             if t < valid_len:
-                # 提取 t-1 时刻的特征用于计算趋势 (当 t=0 时没有上个月数据，传 None)
                 prev_vals = series[t-1] if t > 0 else None
-                gt_seq, hd_seq, raw_len = self.process_single_step(time_ref[t], series[t], prev_vals, label, True)
+                seq, raw_len = self.process_single_step(time_ref[t], series[t], prev_vals, label, True)
             else:
-                # 填充时刻，prev_vals 也传 None
-                gt_seq, hd_seq, raw_len = self.process_single_step(None, np.zeros(series.shape[1]), None, label, False)
+                seq, raw_len = self.process_single_step(None, np.zeros(series.shape[1]), None, label, False)
             
             if raw_len > sample_raw_max:
                 sample_raw_max = raw_len
                 
-            gt_ids_list.append(torch.tensor(gt_seq, dtype=torch.long))
-            hd_ids_list.append(torch.tensor(hd_seq, dtype=torch.long))
+            ids_list.append(torch.tensor(seq, dtype=torch.long))
 
         local_max = 0
-        for x in gt_ids_list + hd_ids_list:
+        for x in ids_list:
             if len(x) > local_max: local_max = len(x)
         
         pad_id = self.tokenizer.pad_token_id
         
-        gt_input_ids = torch.full((seq_len, local_max), pad_id, dtype=torch.long)
-        gt_mask = torch.zeros((seq_len, local_max), dtype=torch.long)
-        gt_lens = torch.zeros(seq_len, dtype=torch.long)
-        
-        hd_input_ids = torch.full((seq_len, local_max), pad_id, dtype=torch.long)
-        hd_mask = torch.zeros((seq_len, local_max), dtype=torch.long)
-        hd_lens = torch.zeros(seq_len, dtype=torch.long)
+        input_ids = torch.full((seq_len, local_max), pad_id, dtype=torch.long)
+        mask = torch.zeros((seq_len, local_max), dtype=torch.long)
+        lens = torch.zeros(seq_len, dtype=torch.long)
         
         for i in range(seq_len):
-            l = len(gt_ids_list[i])
-            gt_input_ids[i, :l] = gt_ids_list[i]
-            gt_mask[i, :l] = 1
-            gt_lens[i] = l
-            l = len(hd_ids_list[i])
-            hd_input_ids[i, :l] = hd_ids_list[i]
-            hd_mask[i, :l] = 1
-            hd_lens[i] = l
+            l = len(ids_list[i])
+            input_ids[i, :l] = ids_list[i]
+            mask[i, :l] = 1
+            lens[i] = l
 
         return {
             'idx': idx,
-            'gt_input_ids': gt_input_ids,
-            'gt_mask': gt_mask,
-            'gt_lens': gt_lens,
-            'hd_input_ids': hd_input_ids,
-            'hd_mask': hd_mask,
-            'hd_lens': hd_lens,
-            'sample_raw_max': sample_raw_max # [新增]
+            'input_ids': input_ids,
+            'mask': mask,
+            'lens': lens,
+            'sample_raw_max': sample_raw_max
         }
 
     def collate_fn(self, batch):
         batch_idx = np.array([sample['idx'] for sample in batch])
         
         batch_max_len = 0
-        batch_raw_max = 0 # [新增]
+        batch_raw_max = 0 
         for sample in batch:
-            batch_max_len = max(batch_max_len, sample['gt_input_ids'].shape[1], sample['hd_input_ids'].shape[1])
+            batch_max_len = max(batch_max_len, sample['input_ids'].shape[1])
             if sample['sample_raw_max'] > batch_raw_max:
                 batch_raw_max = sample['sample_raw_max']
                 
@@ -264,34 +225,22 @@ class Amex_Dataset:
         batch_size = len(batch)
         seq_len = 13
         
-        final_gt_ids = torch.full((batch_size, seq_len, batch_max_len), pad_id, dtype=torch.long)
-        final_gt_mask = torch.zeros((batch_size, seq_len, batch_max_len), dtype=torch.long)
-        final_gt_lens = torch.zeros((batch_size, seq_len), dtype=torch.long)
-        
-        final_hd_ids = torch.full((batch_size, seq_len, batch_max_len), pad_id, dtype=torch.long)
-        final_hd_mask = torch.zeros((batch_size, seq_len, batch_max_len), dtype=torch.long)
-        final_hd_lens = torch.zeros((batch_size, seq_len), dtype=torch.long)
+        final_ids = torch.full((batch_size, seq_len, batch_max_len), pad_id, dtype=torch.long)
+        final_mask = torch.zeros((batch_size, seq_len, batch_max_len), dtype=torch.long)
+        final_lens = torch.zeros((batch_size, seq_len), dtype=torch.long)
 
         for i, sample in enumerate(batch):
-            l = sample['gt_input_ids'].shape[1]
-            final_gt_ids[i, :, :l] = sample['gt_input_ids']
-            final_gt_mask[i, :, :l] = sample['gt_mask']
-            final_gt_lens[i, :] = sample['gt_lens']
-            
-            l = sample['hd_input_ids'].shape[1]
-            final_hd_ids[i, :, :l] = sample['hd_input_ids']
-            final_hd_mask[i, :, :l] = sample['hd_mask']
-            final_hd_lens[i, :] = sample['hd_lens']
+            l = sample['input_ids'].shape[1]
+            final_ids[i, :, :l] = sample['input_ids']
+            final_mask[i, :, :l] = sample['mask']
+            final_lens[i, :] = sample['lens']
 
         return {
             'batch_idx': batch_idx,
-            'gt_input_ids': final_gt_ids,
-            'gt_mask': final_gt_mask,
-            'gt_lens': final_gt_lens,
-            'hd_input_ids': final_hd_ids,
-            'hd_mask': final_hd_mask,
-            'hd_lens': final_hd_lens,
-            'batch_raw_max': batch_raw_max # [新增]
+            'input_ids': final_ids,
+            'mask': final_mask,
+            'lens': final_lens,
+            'batch_raw_max': batch_raw_max 
         }
 
 def parse_args():
@@ -306,22 +255,18 @@ def parse_args():
     parser.add_argument("--l_layers", type=int, default=6)
     parser.add_argument("--data_type", type=str, default='original')
     parser.add_argument("--sampling", type=str, default='100pct')
-    # [优化] Batch Size 建议 64 - 128
     parser.add_argument("--batch_size", type=int, default=64)
-    # [优化] 限制 Token 长度防止 OOM
     parser.add_argument("--max_token_len", type=int, default=2048) 
-    
-    # [新增] 截断控制参数
     parser.add_argument("--allow_truncate", type=int, default=0, help="0: 不允许截断 (可能OOM), 1: 允许截断并在发生时发出警告")
-
-    # [CHUNK LOGIC]
     parser.add_argument("--chunk_id", type=int, default=0)
     parser.add_argument("--total_chunks", type=int, default=1)
+    parser.add_argument("--emb_version", type=str, default="v8") 
+    parser.add_argument("--train_test", type=str, default="train", choices=["train", "test"], help="Specify whether to process train or test dataset")
 
     return parser.parse_args()
 
 def save_train_embeddings(args, train_test='train'):
-    print(f'save_train_embeddings - V5 (Pre-allocated Huge Array + Bulletproof OS Chunking)')
+    print(f'save_train_embeddings - Single-Stream Optimization')
     
     input_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/'
     series = pd.read_feather(f'{input_path}/df_nn_series_{train_test}.feather')
@@ -334,21 +279,17 @@ def save_train_embeddings(args, train_test='train'):
     dynamic_feature_names = series.drop(['customer_ID', 'S_2'], axis=1).columns.tolist()
     args.num_nodes = len(dynamic_feature_names)
 
-    # --- PURE OS LEVEL CHUNKING LOGIC ---
     total_samples_full = len(series_idx_full)
     
-    # Use np.array_split for mathematically perfect, load-balanced chunks
     splits = np.array_split(series_idx_full, args.total_chunks)
     series_idx = splits[args.chunk_id]
     
     total_samples = len(series_idx)
     print(f"GPU Chunk {args.chunk_id + 1}/{args.total_chunks} processing {total_samples} samples out of {total_samples_full}...")
     
-    # Handle zero-sample edge case gracefully
     if total_samples == 0:
         print(f"Chunk {args.chunk_id} has 0 samples. Exiting early.")
         return
-    # ------------------------------------
 
     print("Initializing Model...")
     gen_prompt_emb = GenPromptEmb(
@@ -385,24 +326,29 @@ def save_train_embeddings(args, train_test='train'):
         prefetch_factor=4
     )
 
-    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/emb_06/'
+    # [新增] 动态解析 emb_version 映射到 emb_XX 格式
+    # 提取字符串中的数字，然后用 %02d 格式化，比如 'v7' -> '07'
+    version_num = "".join(filter(str.isdigit, args.emb_version))
+    if not version_num:
+        version_num = "0" # fallback
+    formatted_version = f"emb_{int(version_num):02d}"
+    
+    emb_path = f'../../000_data/amex/{args.data_type}_{args.sampling}/{formatted_version}/'
     os.makedirs(emb_path, exist_ok=True)
     
     output_h5_path = os.path.join(emb_path, f"{train_test}_embeddings_chunk_{args.chunk_id}.h5")
     print(f"Saving to: {output_h5_path}")
 
-    # [新增] 全局跟踪最大原始 Token 长度
     global_max_raw_len = 0 
 
     with h5py.File(output_h5_path, 'w') as hf:
         
-        # Prevent HDF5 crash if total_samples < batch_size
         chunk_dim_0 = min(args.batch_size, total_samples)
         chunk_shape = (chunk_dim_0, args.input_len, args.d_model)
         
         emb_dset = hf.create_dataset('embeddings', 
                                      shape=(total_samples, args.input_len, args.d_model),
-                                     dtype='float32',
+                                     dtype='float16', 
                                      chunks=chunk_shape)
         
         dt = h5py.string_dtype(encoding='utf-8')
@@ -416,30 +362,24 @@ def save_train_embeddings(args, train_test='train'):
         
         bar = tqdm(dataloader)
         for data in bar:
-            # [新增] 动态更新全局最大原始 Token 长度
             if data['batch_raw_max'] > global_max_raw_len:
                 global_max_raw_len = data['batch_raw_max']
                 
             batch_ids = data['batch_idx'] 
             current_batch_size = len(batch_ids)
             
-            b, s, l = data['gt_input_ids'].shape
+            b, s, l = data['input_ids'].shape
             
-            gt_input_ids = data['gt_input_ids'].view(-1, l).to(args.device)
-            gt_mask = data['gt_mask'].view(-1, l).to(args.device)
-            gt_lens = data['gt_lens'].view(-1).to(args.device)
-            
-            hd_input_ids = data['hd_input_ids'].view(-1, l).to(args.device)
-            hd_mask = data['hd_mask'].view(-1, l).to(args.device)
-            hd_lens = data['hd_lens'].view(-1).to(args.device)
+            input_ids = data['input_ids'].view(-1, l).to(args.device)
+            mask = data['mask'].view(-1, l).to(args.device)
+            lens = data['lens'].view(-1).to(args.device)
 
             with torch.no_grad():
                 embeddings_batch = gen_prompt_emb.forward_tokenized(
-                    gt_input_ids, gt_mask, gt_lens,
-                    hd_input_ids, hd_mask, hd_lens
+                    input_ids, mask, lens
                 )
             
-            embeddings_np = embeddings_batch.detach().cpu().numpy()
+            embeddings_np = embeddings_batch.detach().cpu().numpy().astype(np.float16)
             
             emb_dset[global_idx : global_idx + current_batch_size] = embeddings_np
             id_dset[global_idx : global_idx + current_batch_size] = [str(x) for x in batch_ids]
@@ -454,9 +394,8 @@ def save_train_embeddings(args, train_test='train'):
     if global_max_raw_len > effective_max_len:
         if args.allow_truncate == 1:
             print(f"⚠️ [WARN] Truncation OCCURRED! Some features were discarded.")
-            print(f"💡 Suggestion: You may safely increase --max_token_len to {global_max_raw_len} in your script if VRAM allows.")
         else:
-            print(f"❌ [ERROR] Token length exceeded limit and allow_truncate is 0! This may have caused unexpected behavior.")
+            print(f"❌ [ERROR] Token length exceeded limit and allow_truncate is 0!")
     else:
         print(f"✅ [OK] No truncation occurred. Token length is well within safe limits.")
     print("="*60 + "\n")
@@ -468,7 +407,7 @@ if __name__ == "__main__":
 
     args = parse_args()
     print(args)
-    save_train_embeddings(args, 'train')
+    save_train_embeddings(args, args.train_test)
 
     t2 = datetime.now()
     duration = t2 - t1

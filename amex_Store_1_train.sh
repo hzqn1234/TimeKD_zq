@@ -1,48 +1,51 @@
 #!/bin/sh
 
-#### SBATCH -o gpu-job-%j.output
-#SBATCH -o gpu-job-store-emb-2.output
-#SBATCH -p HPCAIq
-# SBATCH --gres=gpu:2
+#SBATCH -o gpu-job-store-emb-1_train.output
+#SBATCH -p RTXA6Kq
+# SBATCH --gres=gpu:4
 
 #SBATCH -n 1
-#SBATCH -c 16
-#SBATCH -w node14
+#SBATCH -c 24
+#SBATCH -w node16
 
 # Define the specific GPUs you want to use as a space-separated string (NOT an array).
 # You can change this to GPUS="0" to run on a single GPU, or GPUS="0 1 2" for multiple.
-GPUS="0 5" 
+GPUS="0 1 2 3 4" 
 
 # Define parameters as variables so they can be reused for the path
 DATA_TYPE="original"
-SAMPLING="100pct"
-EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/emb_06"
+SAMPLING="10pct"
+EMB_VERSION="v8"
+
+V_NUM=$(echo $EMB_VERSION | tr -dc '0-9')
+FORMATTED_VERSION=$(printf "emb_%02d" $V_NUM)
+EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/${FORMATTED_VERSION}"
 echo "Embedding output will be saved to: ${EMB_DIR}"
 
-# # === NEW CLEANUP LOGIC ===
-# echo "Ensuring directory exists and clearing previous embedding files in ${EMB_DIR}..."
-# mkdir -p "$EMB_DIR"
-# rm -f "$EMB_DIR"/*.h5
-# # =========================
+# === NEW CLEANUP LOGIC ===
+echo "Ensuring directory exists and clearing previous train embedding files in ${EMB_DIR}..."
+mkdir -p "$EMB_DIR"
+rm -f "$EMB_DIR"/train_*.h5
+# =========================
 
 # Calculate the total number of chunks by counting the items in the GPUS string
-# TOTAL_CHUNKS=0
-# for gpu in $GPUS; do
-#     TOTAL_CHUNKS=$((TOTAL_CHUNKS + 1))
-# done
-TOTAL_CHUNKS=5
+TOTAL_CHUNKS=0
+for gpu in $GPUS; do
+    TOTAL_CHUNKS=$((TOTAL_CHUNKS + 1))
+done
+# TOTAL_CHUNKS=5
 
 echo "Running $TOTAL_CHUNKS chunks across GPUs: $GPUS"
 
 # OS-Level Parallelism: Launch independent processes simultaneously
-i=3
+i=0
 PIDS="" # Variable to store the Process IDs
 
 for GPU_ID in $GPUS; do
     echo "Starting chunk $i on GPU $GPU_ID..."
     
     CUDA_VISIBLE_DEVICES=$GPU_ID \
-    python  -u amex_store_emb.py \
+    python -u amex_store_emb.py \
             --num_nodes 223 \
             --data_type "$DATA_TYPE" \
             --batch_size 32 \
@@ -55,7 +58,9 @@ for GPU_ID in $GPUS; do
             --total_chunks $TOTAL_CHUNKS \
             --allow_truncate 0 \
             --l_layers 16 \
-            > store_emb_2_chunk_${i}.log 2>&1 &
+            --emb_version "$EMB_VERSION" \
+            --train_test "train" \
+            > store_emb_1_train_chunk_${i}.log 2>&1 &
             
     # Capture the PID of the last background command
     PID=$!

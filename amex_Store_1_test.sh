@@ -1,28 +1,31 @@
 #!/bin/sh
 
-#### SBATCH -o gpu-job-%j.output
-#SBATCH -o gpu-job-store-emb-1.output
-#SBATCH -p PA100q
+#SBATCH -o gpu-job-store-emb-1_test.output
+#SBATCH -p RTXA6Kq
 # SBATCH --gres=gpu:4
 
 #SBATCH -n 1
 #SBATCH -c 24
-#SBATCH -w node02
+#SBATCH -w node16
 
 # Define the specific GPUs you want to use as a space-separated string (NOT an array).
 # You can change this to GPUS="0" to run on a single GPU, or GPUS="0 1 2" for multiple.
-GPUS="5 6 7" 
+GPUS="0 1 2 3 4" 
 
 # Define parameters as variables so they can be reused for the path
 DATA_TYPE="original"
-SAMPLING="10pct"
-EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/emb_06"
+SAMPLING="100pct"
+EMB_VERSION="v8"
+
+V_NUM=$(echo $EMB_VERSION | tr -dc '0-9')
+FORMATTED_VERSION=$(printf "emb_%02d" $V_NUM)
+EMB_DIR="../../000_data/amex/${DATA_TYPE}_${SAMPLING}/${FORMATTED_VERSION}"
 echo "Embedding output will be saved to: ${EMB_DIR}"
 
 # === NEW CLEANUP LOGIC ===
-echo "Ensuring directory exists and clearing previous embedding files in ${EMB_DIR}..."
+echo "Ensuring directory exists and clearing previous test embedding files in ${EMB_DIR}..."
 mkdir -p "$EMB_DIR"
-rm -f "$EMB_DIR"/*.h5
+rm -f "$EMB_DIR"/test_*.h5
 # =========================
 
 # Calculate the total number of chunks by counting the items in the GPUS string
@@ -55,7 +58,9 @@ for GPU_ID in $GPUS; do
             --total_chunks $TOTAL_CHUNKS \
             --allow_truncate 0 \
             --l_layers 16 \
-            > store_emb_1_chunk_${i}.log 2>&1 &
+            --emb_version "$EMB_VERSION" \
+            --train_test "test" \
+            > store_emb_1_test_chunk_${i}.log 2>&1 &
             
     # Capture the PID of the last background command
     PID=$!
@@ -81,6 +86,6 @@ if [ $FAILED -ne 0 ]; then
     echo "FAILED: One or more embedding chunks failed. Please check the individual log files."
     exit 1
 else
-    echo "SUCCESS: All $TOTAL_CHUNKS train embedding chunks finished successfully!"
+    echo "SUCCESS: All $TOTAL_CHUNKS test embedding chunks finished successfully!"
     exit 0
 fi

@@ -1,15 +1,16 @@
 #!/bin/sh
 
 #SBATCH -o gpu-job-train-1.output
-#SBATCH -p HPCAIq
+#SBATCH -p PA100q
 #SBATCH --gpus-per-node=1
 #SBATCH -n 1
 #SBATCH -c 8
-#SBATCH -w node14
+#SBATCH -w node05
 
-GPU_ID=0
-SAMPLING="10pct"
-LRs="1e-4"
+GPU_ID=1
+SAMPLING="100pct"
+LRs="1e-3 5e-4 1e-4 5e-5"
+EMB_version="v8"
 
 for lr in $LRs
 do
@@ -19,35 +20,35 @@ do
     
     for seed in 42
     do 
-        echo "========================================"
-        echo "   Stage 1: Teacher Pre-training (seed: $seed)"
-        echo "========================================"
+        # echo "========================================"
+        # echo "   Stage 1: Teacher Pre-training (seed: $seed)"
+        # echo "========================================"
         
-        # 第一阶段：只关注 Teacher 的拟合 (recon_w=1)，其余全部设0
-        CUDA_VISIBLE_DEVICES=$GPU_ID \
-        python amex_train.py \
-            --stage 1 \
-            --lrate $lr \
-            --sampling "$SAMPLING" \
-            --data_type "original" \
-            --num_nodes 223 \
-            --es_patience 3 \
-            --seed $seed \
-            --train \
-            --batch_size 128 \
-            --num_workers 8 \
-            --feature_w 0.0 \
-            --fcst_w 0.0 \
-            --recon_w 1.0 \
-            --att_w 0.0 \
-            --distill_w 0.0 \
-            --emb_version "v6" \
-            --remark "Stage 1 Pretrain Teacher" \
-            --epochs 20 
+        # # 第一阶段：只关注 Teacher 的拟合 (recon_w=1)，其余全部设0
+        # CUDA_VISIBLE_DEVICES=$GPU_ID \
+        # python amex_train.py \
+        #     --stage 1 \
+        #     --lrate $lr \
+        #     --sampling "$SAMPLING" \
+        #     --data_type "original" \
+        #     --num_nodes 223 \
+        #     --es_patience 3 \
+        #     --seed $seed \
+        #     --train \
+        #     --batch_size 128 \
+        #     --num_workers 8 \
+        #     --feature_w 0.0 \
+        #     --fcst_w 0.0 \
+        #     --recon_w 1.0 \
+        #     --att_w 0.0 \
+        #     --distill_w 0.0 \
+        #     --emb_version "$EMB_version" \
+        #     --remark "Stage 1 Pretrain Teacher" \
+        #     --epochs 20 
             
         # 动态获取最新的 Stage 1 保存目录作为 Teacher 模型路径
         # 确保自动捕获含有best_model的准确路径
-        TEACHER_DIR=$(ls -td ./logs/Amex/S1_* | head -1)
+        TEACHER_DIR="./logs/Amex/S1_teacher_original_${EMB_version}_${SAMPLING}_${lr}_${seed}"
         
         echo ""
         echo "=> Teacher models generated at: $TEACHER_DIR"
@@ -80,8 +81,39 @@ do
             --recon_w 0.0 \
             --att_w 0.5 \
             --distill_w 1.0 \
-            --emb_version "v6" \
-            --remark "Stage 2 Distillation" \
+            --temperature 5.0 \
+            --emb_version "$EMB_version" \
+            --remark "Stage 2 Distillation, shift sigmoid" \
             --epochs 20 
+
+
+        # echo "========================================"
+        # echo "   Stage 3: Student-only Baseline (seed: $seed)"
+        # echo "========================================"
+
+        # CUDA_VISIBLE_DEVICES=$GPU_ID \
+        # python amex_train.py \
+        #     --stage 3 \
+        #     --lrate $lr \
+        #     --sampling "$SAMPLING" \
+        #     --data_type "original" \
+        #     --num_nodes 223 \
+        #     --es_patience 3 \
+        #     --seed $seed \
+        #     --train \
+        #     --test \
+        #     --predict \
+        #     --submit \
+        #     --batch_size 128 \
+        #     --num_workers 8 \
+        #     --feature_w 0.0 \
+        #     --fcst_w 1.0 \
+        #     --recon_w 0.0 \
+        #     --att_w 0.0 \
+        #     --distill_w 0.0 \
+        #     --temperature 5.0 \
+        #     --emb_version "$EMB_version" \
+        #     --remark "Stage 3 Student-only baseline" \
+        #     --epochs 20
     done
 done
