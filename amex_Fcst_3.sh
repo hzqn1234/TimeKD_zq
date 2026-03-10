@@ -8,8 +8,9 @@
 #SBATCH -w node17
 
 GPU_ID=3
-SAMPLING="1pct"
-LRs="1e-3 5e-4 1e-4 5e-5"
+SAMPLING="100pct"
+# LRs="1e-3 5e-4 1e-4 5e-5"
+LRs="1e-4 5e-5"
 EMB_version="v8"
 
 for lr in $LRs
@@ -24,28 +25,36 @@ do
         # echo "   Stage 1: Teacher Pre-training (seed: $seed)"
         # echo "========================================"
         
-        # # 第一阶段：只关注 Teacher 的拟合 (recon_w=1)，其余全部设0
-        # CUDA_VISIBLE_DEVICES=$GPU_ID \
-        # python amex_train.py \
-        #     --stage 1 \
-        #     --lrate $lr \
-        #     --sampling "$SAMPLING" \
-        #     --data_type "original" \
-        #     --num_nodes 223 \
-        #     --es_patience 3 \
-        #     --seed $seed \
-        #     --train \
-        #     --batch_size 128 \
-        #     --num_workers 8 \
-        #     --feature_w 0.0 \
-        #     --fcst_w 0.0 \
-        #     --recon_w 1.0 \
-        #     --att_w 0.0 \
-        #     --distill_w 0.0 \
-        #     --emb_version "$EMB_version" \
-        #     --remark "Stage 1 Pretrain Teacher" \
-        #     --epochs 20 
+        # 第一阶段：只关注 Teacher 的拟合 (recon_w=1)，其余全部设0
+        CUDA_VISIBLE_DEVICES=$GPU_ID \
+        python amex_train.py \
+            --stage 1 \
+            --lrate $lr \
+            --sampling "$SAMPLING" \
+            --data_type "original" \
+            --num_nodes 223 \
+            --es_patience 3 \
+            --seed $seed \
+            --train \
+            --test \
+            --predict \
+            --submit \
+            --batch_size 128 \
+            --num_workers 8 \
+            --feature_w 0.0 \
+            --fcst_w 0.0 \
+            --recon_w 1.0 \
+            --att_w 0.0 \
+            --distill_w 0.0 \
+            --emb_version "$EMB_version" \
+            --remark "Stage 1 Pretrain Teacher" \
+            --epochs 20 
             
+
+        echo "========================================"
+        echo "   Stage 2: Student Distillation (seed: $seed)"
+        echo "========================================"
+
         # 动态获取最新的 Stage 1 保存目录作为 Teacher 模型路径
         # 确保自动捕获含有best_model的准确路径
         TEACHER_DIR="./logs/Amex/S1_teacher_original_${EMB_version}_${SAMPLING}_${lr}_${seed}"
@@ -53,10 +62,6 @@ do
         echo ""
         echo "=> Teacher models generated at: $TEACHER_DIR"
         echo ""
-
-        echo "========================================"
-        echo "   Stage 2: Student Distillation (seed: $seed)"
-        echo "========================================"
         
         # 第二阶段：冻结 Teacher，开启蒸馏，优化 Student
         # 此时关闭 recon_w，打开 fcst_w, feature_w, att_w, distill_w
@@ -87,33 +92,33 @@ do
             --epochs 20 
 
 
-        # echo "========================================"
-        # echo "   Stage 3: Student-only Baseline (seed: $seed)"
-        # echo "========================================"
+        echo "========================================"
+        echo "   Stage 3: Student-only Baseline (seed: $seed)"
+        echo "========================================"
 
-        # CUDA_VISIBLE_DEVICES=$GPU_ID \
-        # python amex_train.py \
-        #     --stage 3 \
-        #     --lrate $lr \
-        #     --sampling "$SAMPLING" \
-        #     --data_type "original" \
-        #     --num_nodes 223 \
-        #     --es_patience 3 \
-        #     --seed $seed \
-        #     --train \
-        #     --test \
-        #     --predict \
-        #     --submit \
-        #     --batch_size 128 \
-        #     --num_workers 8 \
-        #     --feature_w 0.0 \
-        #     --fcst_w 1.0 \
-        #     --recon_w 0.0 \
-        #     --att_w 0.0 \
-        #     --distill_w 0.0 \
-        #     --temperature 5.0 \
-        #     --emb_version "$EMB_version" \
-        #     --remark "Stage 3 Student-only baseline" \
-        #     --epochs 20
+        CUDA_VISIBLE_DEVICES=$GPU_ID \
+        python amex_train.py \
+            --stage 3 \
+            --lrate $lr \
+            --sampling "$SAMPLING" \
+            --data_type "original" \
+            --num_nodes 223 \
+            --es_patience 3 \
+            --seed $seed \
+            --train \
+            --test \
+            --predict \
+            --submit \
+            --batch_size 128 \
+            --num_workers 8 \
+            --feature_w 0.0 \
+            --fcst_w 1.0 \
+            --recon_w 0.0 \
+            --att_w 0.0 \
+            --distill_w 0.0 \
+            --temperature 5.0 \
+            --emb_version "$EMB_version" \
+            --remark "Stage 3 Student-only baseline" \
+            --epochs 20
     done
 done

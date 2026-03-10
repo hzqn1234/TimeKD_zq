@@ -1,4 +1,3 @@
-
 import torch
 from torch import optim
 import numpy as np
@@ -85,25 +84,34 @@ def parse_args():
 
 
 class Amex_Dataset:
-    def __init__(self, df_series, uidxs, df_y=None, label_name='target', id_name='customer_ID', use_embedding=True):
+    def __init__(self, df_series, uidxs, df_y=None, label_name='target', id_name='customer_ID', use_embedding=True, emb_path=None):
         self.df_series = df_series
         self.df_y = df_y
         self.uidxs = uidxs
         self.label_name = label_name
         self.id_name = id_name
         self.is_train = df_y is not None
-        self.use_embedding = bool(use_embedding) and self.is_train
+        
+        # 允许在非训练阶段使用 Embedding
+        self.use_embedding = bool(use_embedding)
         self.id_to_file_and_row = {}
 
         if self.use_embedding:
-            chunk_files = glob.glob(os.path.join(emb_path, "train_embeddings_chunk_*.h5"))
+            # 增加路径校验，必须显式传入 emb_path
+            if emb_path is None:
+                raise ValueError("When use_embedding is True, a valid emb_path must be provided!")
+                
+            # 根据是否包含 label 判断读取 train 还是 test 的 embedding
+            prefix = "train" if self.is_train else "test"
+            chunk_files = glob.glob(os.path.join(emb_path, f"{prefix}_embeddings_chunk_*.h5"))
+            
             if not chunk_files:
-                fallback_file = os.path.join(emb_path, "train_embeddings_all.h5")
+                fallback_file = os.path.join(emb_path, f"{prefix}_embeddings_all.h5")
                 if os.path.exists(fallback_file):
                     chunk_files = [fallback_file]
 
             if not chunk_files:
-                raise FileNotFoundError(f"No embedding h5 files found under {emb_path}")
+                raise FileNotFoundError(f"No {prefix} embedding h5 files found under {emb_path}")
 
             for fpath in chunk_files:
                 print(f"Loading embedding index from chunk: {fpath}")
@@ -128,24 +136,24 @@ class Amex_Dataset:
         if len(series.shape) == 1:
             series = series.reshape((-1,) + series.shape[-1:])
 
+        # 无论是否是 is_train，只要 use_embedding 为 True 就提取特征
+        emb_tensor = None
+        if self.use_embedding:
+            mapping = self.id_to_file_and_row.get(str(idx))
+            if mapping is None:
+                raise ValueError(f"Customer ID {idx} not found in any embedding chunk!")
+
+            fpath, row_idx = mapping
+
+            if not hasattr(self, 'h5_handlers'):
+                self.h5_handlers = {}
+            if fpath not in self.h5_handlers:
+                self.h5_handlers[fpath] = h5py.File(fpath, 'r')
+
+            emb_data = self.h5_handlers[fpath]['embeddings'][row_idx]
+            emb_tensor = torch.from_numpy(emb_data)
+
         if self.is_train:
-            emb_tensor = None
-
-            if self.use_embedding:
-                mapping = self.id_to_file_and_row.get(str(idx))
-                if mapping is None:
-                    raise ValueError(f"Customer ID {idx} not found in any embedding chunk!")
-
-                fpath, row_idx = mapping
-
-                if not hasattr(self, 'h5_handlers'):
-                    self.h5_handlers = {}
-                if fpath not in self.h5_handlers:
-                    self.h5_handlers[fpath] = h5py.File(fpath, 'r')
-
-                emb_data = self.h5_handlers[fpath]['embeddings'][row_idx]
-                emb_tensor = torch.from_numpy(emb_data)
-
             label = self.df_y.loc[idx, [self.label_name]].values
             return {
                 'SERIES': series,
@@ -159,6 +167,7 @@ class Amex_Dataset:
                 'SERIES': series,
                 'time_ref': time_ref,
                 'idx': idx,
+                'emb_tensor': emb_tensor,
             }
 
     def collate_fn(self, batch):
@@ -293,7 +302,6 @@ class trainer:
                     print("Test/Predict phase initialized (Teacher weights will be loaded with the whole model).")
             else:
                 if is_training:
-                    # print(f"WARNING: Valid Teacher path not provided for Stage 2! ({teacher_path})")
                     raise ValueError(f"WARNING: Valid Teacher path not provided for Stage 2! ({teacher_path})")
 
             for param in self.model.input_series_block_n1_t.parameters():
@@ -399,7 +407,6 @@ seed_it(args.seed)
 device = torch.device(args.device)
 
 stage_name_map = {
-    # 0: "joint",
     1: "teacher",
     2: "distill",
     3: "student",
@@ -468,7 +475,8 @@ def main_train():
             trainval_series,
             [trainval_series_idx[i] for i in trn_index],
             trainval_y,
-            use_embedding=use_embedding
+            use_embedding=use_embedding,
+            emb_path=emb_path  # 显式传入全局解析好的 emb_path
         )
         train_dataloader = DataLoader(
             train_dataset,
@@ -483,7 +491,8 @@ def main_train():
             trainval_series,
             [trainval_series_idx[i] for i in val_index],
             trainval_y,
-            use_embedding=use_embedding
+            use_embedding=use_embedding,
+            emb_path=emb_path  # 显式传入全局解析好的 emb_path
         )
         validation_dataloader = DataLoader(
             validation_dataset,
@@ -633,20 +642,34 @@ def main_test(is_predict=False):
     print(f"Start Testing at {test_start_time}")
     print(f'is_predict={is_predict}')
 
+    # 动态计算所需的 emb_path 传给 Dataset
     if is_predict:
         input_path = f'../../000_data/amex/original_100pct'
         print(f'predict input_path: {input_path}')
+        
+        if args.emb_version and args.emb_version.startswith('v') and args.emb_version[1:].isdigit():
+            v_num = args.emb_version[1:].zfill(2)
+            local_emb_path = f'{input_path}/emb_{v_num}/'
+            print(f'predict local_emb_path updated to: {local_emb_path}')
+        else:
+            local_emb_path = None
     else:
         input_path = INPUT_PATH
         test_y = pd.read_csv(f'{input_path}/test_labels.csv')['target']
+        local_emb_path = emb_path  # 普通 test 使用全局原本解析好的路径
 
     test_series = pd.read_feather(f'{input_path}/df_nn_series_test.feather')
     test_series_idx = pd.read_feather(f'{input_path}/df_nn_series_idx_test.feather').values
 
-    test_dataset = Amex_Dataset(test_series, test_series_idx)
+    # 如果当前是 Stage 1 (教师模型)，则必须启用 embedding
+    use_emb_flag = True if args.stage == 1 else False
+    
+    # 显式传入 local_emb_path 避免全局变量污染
+    test_dataset = Amex_Dataset(test_series, test_series_idx, use_embedding=use_emb_flag, emb_path=local_emb_path)
+    
     test_dataloader = DataLoader(
         test_dataset,
-        batch_size=args.batch_size * 8,
+        batch_size=args.batch_size * 8, # 保留原有的加速设定
         shuffle=False,
         drop_last=False,
         collate_fn=test_dataset.collate_fn,
@@ -684,10 +707,14 @@ def main_test(is_predict=False):
 
     for _, data in enumerate(tqdm(test_dataloader)):
         with torch.no_grad():
+            # 判断是取学生输出(索引2)还是教师输出(索引3)
+            out_idx = 3 if args.stage == 1 else 2
+            
             if data['batch_series'].shape[0] == 1:
-                pred_y = torch.tensor([torch.stack([m(data)[2] for m in models], 0).mean(0)]).to(device)
+                # 前向传播显式传入 stage=args.stage
+                pred_y = torch.tensor([torch.stack([m(data, stage=args.stage)[out_idx] for m in models], 0).mean(0)]).to(device)
             else:
-                pred_y = torch.stack([m(data)[2] for m in models], 0).mean(0)
+                pred_y = torch.stack([m(data, stage=args.stage)[out_idx] for m in models], 0).mean(0)
 
         test_outputs.append(pred_y)
 
@@ -770,28 +797,20 @@ if __name__ == "__main__":
         main_train()
 
     if args.test:
-        if args.stage == 1:
-            print('>>> 跳过测试: Stage 1 为Teacher预训练，无法在没有 Embedding 的 Test 集上进行推理。')
-        elif args.data_type == 'original' and args.sampling == '100pct':
+        if args.data_type == 'original' and args.sampling == '100pct':
             print('Skip Test for orginal_100pct')
         else:
             main_test()
 
     if args.predict:
-        if args.stage == 1:
-            print('>>> 跳过预测: Stage 1 为Teacher预训练，无法在没有 Embedding 的 Test 集上进行预测。')
-        else:
-            log_df = main_test(is_predict=True)
+        log_df = main_test(is_predict=True)
 
     if args.submit:
-        if args.stage == 1:
-            print('>>> 跳过提交: 无法提交 Stage 1 的Teacher模型预测结果。')
+        if log_df is not None:
+            submit_message = log_df.to_json(orient='records')
         else:
-            if log_df is not None:
-                submit_message = log_df.to_json(orient='records')
-            else:
-                submit_message = f'{model_specs_template}: {model_specs}'
-            os.system(
-                f"""kaggle competitions submit -c amex-default-prediction -f {model_path}/submission.csv.zip -m '{submit_message}'"""
-            )
-            print("\n")
+            submit_message = f'{model_specs_template}: {model_specs}'
+        os.system(
+            f"""kaggle competitions submit -c amex-default-prediction -f {model_path}/submission.csv.zip -m '{submit_message}'"""
+        )
+        print("\n")
