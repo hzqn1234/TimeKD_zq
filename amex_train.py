@@ -1,3 +1,4 @@
+
 import torch
 from torch import optim
 import numpy as np
@@ -18,19 +19,24 @@ from tqdm import tqdm
 import pandas as pd
 from utils.tools import StandardScaler
 import h5py
-from sklearn.model_selection import KFold, StratifiedKFold, GroupKFold
+from sklearn.model_selection import StratifiedKFold
 from datetime import datetime
 
 faulthandler.enable()
 torch.cuda.empty_cache()
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:150"
 
+
 def parse_args():
     parser = argparse.ArgumentParser()
-    # ================= 新增阶段控制参数 =================
-    parser.add_argument("--stage", type=int, default=0, help="0: 联合训练, 1: 仅训练Teacher(预训练), 2: 仅训练Student(蒸馏)")
+    parser.add_argument(
+        "--stage",
+        type=int,
+        default=0,
+        choices=[1, 2, 3],
+        help="1: 仅训练Teacher(预训练), 2: 仅训练Student(蒸馏), 3: 仅训练Student(Baseline)"
+    )
     parser.add_argument("--teacher_dir", type=str, default="", help="Stage 2需要提供Stage 1训练输出的best models所在目录")
-    # ====================================================
     parser.add_argument("--device", type=str, default="cuda", help="")
     parser.add_argument("--data_path", type=str, default="Amex", help="data path")
     parser.add_argument("--sampling", type=str, default='100pct', help="Sampling ratio")
@@ -40,7 +46,7 @@ def parse_args():
     parser.add_argument("--seq_len", type=int, default=13, help="seq_len")
     parser.add_argument("--pred_len", type=int, default=1, help="out_len")
     parser.add_argument("--batch_size", type=int, default=4, help="batch size")
-    parser.add_argument("--lrate", type=float, default=1e-5, help="learning rate")
+    parser.add_argument("--lrate", type=str, default=1e-5, help="learning rate")
     parser.add_argument("--dropout_n", type=float, default=0.2, help="dropout rate of neural network layers")
     parser.add_argument("--d_llm", type=int, default=896, help="hidden dimensions")
     parser.add_argument("--e_layer", type=int, default=1, help="layers of transformer encoder")
@@ -63,7 +69,6 @@ def parse_args():
     parser.add_argument('--submit', action='store_true', help='flag to submit')
     parser.add_argument("--emb_version", type=str, default="v1")
     parser.add_argument("--remark", type=str, default="")
-    
     parser.add_argument(
         "--es_patience",
         type=int,
@@ -78,75 +83,83 @@ def parse_args():
     )
     return parser.parse_args()
 
+
 class Amex_Dataset:
-    def __init__(self, df_series, uidxs, df_y=None, label_name='target', id_name='customer_ID'):
+    def __init__(self, df_series, uidxs, df_y=None, label_name='target', id_name='customer_ID', use_embedding=True):
         self.df_series = df_series
         self.df_y = df_y
         self.uidxs = uidxs
         self.label_name = label_name
         self.id_name = id_name
         self.is_train = df_y is not None
-        
-        # [V6 优化] 支持多个 Chunk 的查找表
-        if self.is_train:
+        self.use_embedding = bool(use_embedding) and self.is_train
+        self.id_to_file_and_row = {}
+
+        if self.use_embedding:
             chunk_files = glob.glob(os.path.join(emb_path, "train_embeddings_chunk_*.h5"))
-            if not chunk_files: # Fallback backwards compatibility
-                chunk_files = [os.path.join(emb_path, "train_embeddings_all.h5")]
-                
-            self.id_to_file_and_row = {}
+            if not chunk_files:
+                fallback_file = os.path.join(emb_path, "train_embeddings_all.h5")
+                if os.path.exists(fallback_file):
+                    chunk_files = [fallback_file]
+
+            if not chunk_files:
+                raise FileNotFoundError(f"No embedding h5 files found under {emb_path}")
+
             for fpath in chunk_files:
                 print(f"Loading embedding index from chunk: {fpath}")
                 with h5py.File(fpath, 'r') as hf:
                     all_ids = hf['customer_ids'][:]
-                    
+
                 for i, cid in enumerate(all_ids):
                     if isinstance(cid, bytes):
                         cid = cid.decode('utf-8')
                     self.id_to_file_and_row[str(cid)] = (fpath, i)
-            
+
             print(f"Index built. Total mapped IDs across chunks: {len(self.id_to_file_and_row)}")
 
     def __len__(self):
-        return (len(self.uidxs))
+        return len(self.uidxs)
 
     def __getitem__(self, index):
         i1, i2, idx = self.uidxs[index]
-        series = self.df_series.iloc[i1:i2+1, 1:].drop(['S_2'], axis=1).values
-        time_ref = self.df_series.iloc[i1:i2+1, 1:]['S_2']
+        series = self.df_series.iloc[i1:i2 + 1, 1:].drop(['S_2'], axis=1).values
+        time_ref = self.df_series.iloc[i1:i2 + 1, 1:]['S_2']
 
         if len(series.shape) == 1:
             series = series.reshape((-1,) + series.shape[-1:])
-        
+
         if self.is_train:
-            mapping = self.id_to_file_and_row.get(str(idx))
-            
-            if mapping is None:
-                raise ValueError(f"Customer ID {idx} not found in any embedding chunk!")
-            
-            fpath, row_idx = mapping
+            emb_tensor = None
 
-            if not hasattr(self, 'h5_handlers'):
-                self.h5_handlers = {}
-            if fpath not in self.h5_handlers:
-                self.h5_handlers[fpath] = h5py.File(fpath, 'r')
+            if self.use_embedding:
+                mapping = self.id_to_file_and_row.get(str(idx))
+                if mapping is None:
+                    raise ValueError(f"Customer ID {idx} not found in any embedding chunk!")
 
-            emb_data = self.h5_handlers[fpath]['embeddings'][row_idx]
-            emb_tensor = torch.from_numpy(emb_data)
+                fpath, row_idx = mapping
+
+                if not hasattr(self, 'h5_handlers'):
+                    self.h5_handlers = {}
+                if fpath not in self.h5_handlers:
+                    self.h5_handlers[fpath] = h5py.File(fpath, 'r')
+
+                emb_data = self.h5_handlers[fpath]['embeddings'][row_idx]
+                emb_tensor = torch.from_numpy(emb_data)
 
             label = self.df_y.loc[idx, [self.label_name]].values
             return {
-                    'SERIES': series,
-                    'LABEL': label,
-                    'time_ref': time_ref,
-                    'idx': idx,
-                    'emb_tensor': emb_tensor,
-                    }
+                'SERIES': series,
+                'LABEL': label,
+                'time_ref': time_ref,
+                'idx': idx,
+                'emb_tensor': emb_tensor,
+            }
         else:
             return {
-                    'SERIES': series,
-                    'time_ref': time_ref,
-                    'idx': idx,
-                    }
+                'SERIES': series,
+                'time_ref': time_ref,
+                'idx': idx,
+            }
 
     def collate_fn(self, batch):
         batch_size = len(batch)
@@ -154,7 +167,6 @@ class Amex_Dataset:
         batch_mask = torch.zeros((batch_size, 13))
         batch_y = torch.zeros(batch_size)
         batch_idx = np.array([sample['idx'] for sample in batch])
-        batch_emb_tensor = None
 
         for i, item in enumerate(batch):
             v = item['SERIES']
@@ -162,50 +174,70 @@ class Amex_Dataset:
             batch_mask[i, :v.shape[0]] = 1.0
 
             if self.is_train:
-                v = item['LABEL'].astype(np.float32)
-                batch_y[i] = torch.tensor(v).float()
-        
-        if self.is_train:
-            batch_emb_tensor = torch.stack([sample['emb_tensor'] for sample in batch], dim=0).float()
+                label_value = item['LABEL'].astype(np.float32)
+                batch_y[i] = torch.tensor(label_value).float()
 
-        return {'batch_series': batch_series,
-                'batch_mask': batch_mask,
-                'batch_y': batch_y,
-                'batch_idx': batch_idx,
-                'batch_emb_tensor': batch_emb_tensor
-                }
+        if self.use_embedding:
+            batch_emb_tensor = torch.stack([sample['emb_tensor'] for sample in batch], dim=0).float()
+        else:
+            batch_emb_tensor = None
+
+        return {
+            'batch_series': batch_series,
+            'batch_mask': batch_mask,
+            'batch_y': batch_y,
+            'batch_idx': batch_idx,
+            'batch_emb_tensor': batch_emb_tensor,
+        }
+
 
 class Criterion:
     def __init__(self, stage):
-        self.feature_loss = 'smooth_l1'  
-        self.fcst_loss = 'bce'
-        self.recon_loss = 'bce'
-        self.att_loss = 'smooth_l1'   
+        self.feature_loss = 'smooth_l1'
+        self.fcst_loss = 'bce_logits'
+        self.recon_loss = 'bce_logits'
+        self.att_loss = 'smooth_l1'
         self.distill_loss = 'bce'
-        
+
         if stage == 1:
-            self.fcst_w    = 0.0
-            self.recon_w   = 1.0  
+            self.fcst_w = 0.0
+            self.recon_w = 1.0
             self.feature_w = 0.0
-            self.att_w     = 0.0
+            self.att_w = 0.0
             self.distill_w = 0.0
         elif stage == 2:
-            self.fcst_w    = args.fcst_w
-            self.recon_w   = 0.0  
+            self.fcst_w = args.fcst_w
+            self.recon_w = 0.0
             self.feature_w = args.feature_w
-            self.att_w     = args.att_w
+            self.att_w = args.att_w
             self.distill_w = args.distill_w
+        elif stage == 3:
+            self.fcst_w = 1.0
+            self.recon_w = 0.0
+            self.feature_w = 0.0
+            self.att_w = 0.0
+            self.distill_w = 0.0
         else:
-            self.fcst_w    = args.fcst_w
-            self.recon_w   = args.recon_w
+            self.fcst_w = args.fcst_w
+            self.recon_w = args.recon_w
             self.feature_w = args.feature_w
-            self.att_w     = args.att_w
+            self.att_w = args.att_w
             self.distill_w = args.distill_w
 
-        self.criterion = KDLoss(self.feature_loss, self.fcst_loss, self.recon_loss, self.att_loss, self.distill_loss,
-                                self.feature_w,  self.fcst_w,  self.recon_w,  self.att_w, self.distill_w,
-                                temperature=args.temperature
-                                )
+        self.criterion = KDLoss(
+            self.feature_loss,
+            self.fcst_loss,
+            self.recon_loss,
+            self.att_loss,
+            self.distill_loss,
+            self.feature_w,
+            self.fcst_w,
+            self.recon_w,
+            self.att_w,
+            self.distill_w,
+            temperature=args.temperature
+        )
+
 
 class trainer:
     def __init__(
@@ -224,7 +256,8 @@ class trainer:
         device,
         epochs,
         stage=0,
-        teacher_path=None
+        teacher_path=None,
+        is_training=True
     ):
         self.MSE = MSE
         self.MAE = MAE
@@ -238,38 +271,68 @@ class trainer:
         self.model.to(self.device)
 
         if stage == 1:
-            print("\n=== Stage 1: Freezing Student, Training Teacher ===")
-            for param in self.model.input_series_block_n1.parameters(): param.requires_grad = False
-            for param in self.model.transformer_encoder.parameters(): param.requires_grad = False
-            for param in self.model.output_block.parameters(): param.requires_grad = False
+            if is_training:
+                print("\n=== Stage 1: Freezing Student, Training Teacher ===")
+            for param in self.model.input_series_block_n1.parameters():
+                param.requires_grad = False
+            for param in self.model.transformer_encoder.parameters():
+                param.requires_grad = False
+            for param in self.model.output_block.parameters():
+                param.requires_grad = False
+
         elif stage == 2:
-            print("\n=== Stage 2: Freezing Teacher, Training Student ===")
+            if is_training:
+                print("\n=== Stage 2: Freezing Teacher, Training Student ===")
+
             if teacher_path and os.path.exists(teacher_path):
                 self.model.load_state_dict(torch.load(teacher_path, map_location=self.device), strict=False)
-                print(f"Loaded Teacher pre-trained weights from: {teacher_path}")
+                if is_training:
+                    print(f"Loaded Teacher pre-trained weights from: {teacher_path}")
             elif teacher_path is None:
-                print("Test/Predict phase initialized (Teacher weights will be loaded with the whole model).")
+                if is_training:
+                    print("Test/Predict phase initialized (Teacher weights will be loaded with the whole model).")
             else:
-                print(f"WARNING: Valid Teacher path not provided for Stage 2! ({teacher_path})")
-                
-            for param in self.model.input_series_block_n1_t.parameters(): param.requires_grad = False
-            for param in self.model.input_series_block_n1_t_raw.parameters(): param.requires_grad = False
-            for param in self.model.transformer_encoder_t.parameters(): param.requires_grad = False
-            for param in self.model.output_block_t.parameters(): param.requires_grad = False
+                if is_training:
+                    # print(f"WARNING: Valid Teacher path not provided for Stage 2! ({teacher_path})")
+                    raise ValueError(f"WARNING: Valid Teacher path not provided for Stage 2! ({teacher_path})")
+
+            for param in self.model.input_series_block_n1_t.parameters():
+                param.requires_grad = False
+            for param in self.model.input_series_block_n1_t_raw.parameters():
+                param.requires_grad = False
+            for param in self.model.transformer_encoder_t.parameters():
+                param.requires_grad = False
+            for param in self.model.output_block_t.parameters():
+                param.requires_grad = False
+
+        elif stage == 3:
+            if is_training:
+                print("\n=== Stage 3: Student-only baseline ===")
+
+            for param in self.model.input_series_block_n1_t.parameters():
+                param.requires_grad = False
+            for param in self.model.input_series_block_n1_t_raw.parameters():
+                param.requires_grad = False
+            for param in self.model.transformer_encoder_t.parameters():
+                param.requires_grad = False
+            for param in self.model.output_block_t.parameters():
+                param.requires_grad = False
 
         trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        print("The number of trainable parameters: {}".format(trainable_params))
+        if is_training:
+            print("The number of trainable parameters: {}".format(trainable_params))
 
         optim_params = [p for p in self.model.parameters() if p.requires_grad]
         self.optimizer = optim.AdamW(optim_params, lr=lrate, weight_decay=wdecay)
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=min(epochs, 100), eta_min=1e-8)
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=min(epochs, 100), eta_min=1e-8
+        )
 
     def train(self, data):
         self.model.train()
         self.optimizer.zero_grad()
 
-        # [FIX 1 核心修复]: 强制将 Teacher 网络切回评估模式，防止 Dropout 和 BN 破坏预训练好的 Teacher 权重
-        if self.stage == 2:
+        if self.stage in [2, 3]:
             self.model.input_series_block_n1_t.eval()
             self.model.input_series_block_n1_t_raw.eval()
             self.model.transformer_encoder_t.eval()
@@ -277,16 +340,18 @@ class trainer:
 
         ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(data)
         y = data['batch_y'].to(self.device)
-        
+
         if data['batch_series'].shape[0] == 1:
-            y =  torch.tensor([y]).to(self.device)
-        
+            y = torch.tensor([y]).to(self.device)
+
         loss = self.criterion(ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att, y)
         loss.backward()
+
         if self.clip is not None:
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip) 
-        self.optimizer.step() 
-        
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip)
+
+        self.optimizer.step()
+
         out_metric = prompt_out if self.stage == 1 else ts_out
         return loss.item(), out_metric
 
@@ -298,10 +363,11 @@ class trainer:
             y = data['batch_y'].to(self.device)
 
             if data['batch_series'].shape[0] == 1:
-                y =  torch.tensor([y]).to(self.device)
+                y = torch.tensor([y]).to(self.device)
 
             loss = self.criterion(ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att, y)
             out_metric = prompt_out if self.stage == 1 else ts_out
+
         return loss.item(), out_metric
 
 
@@ -316,16 +382,15 @@ def seed_it(seed):
     torch.manual_seed(seed)
     torch.backends.cudnn.benchmark = False
 
-args = parse_args()
-INPUT_PATH  = f'../../000_data/amex/{args.data_type}_{args.sampling}'
 
-# 自动解析提取数字并补零 (例如 'v7' -> '7' -> '07')
+args = parse_args()
+INPUT_PATH = f'../../000_data/amex/{args.data_type}_{args.sampling}'
+
 if args.emb_version and args.emb_version.startswith('v') and args.emb_version[1:].isdigit():
-    v_num = args.emb_version[1:].zfill(2) 
+    v_num = args.emb_version[1:].zfill(2)
     emb_path = f'{INPUT_PATH}/emb_{v_num}/'
 else:
     emb_path = None
-
 
 print(f'INPUT_PATH: {INPUT_PATH}')
 print(f'emb_path: {emb_path}')
@@ -333,8 +398,16 @@ print(f'emb_path: {emb_path}')
 seed_it(args.seed)
 device = torch.device(args.device)
 
-model_specs_template =    "S{args.stage}_{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}" 
-model_specs          =   f"S{args.stage}_{args.data_type}_{args.sampling}_{args.lrate}_{args.seed}" 
+stage_name_map = {
+    # 0: "joint",
+    1: "teacher",
+    2: "distill",
+    3: "student",
+}
+stage_name = stage_name_map.get(args.stage, f"stage{args.stage}")
+
+model_specs_template =  "S{args.stage}_{stage_name}_{args.data_type}_{args.emb_version}_{args.sampling}_{args.lrate}_{args.seed}"
+model_specs          = f"S{args.stage}_{stage_name}_{args.data_type}_{args.emb_version}_{args.sampling}_{args.lrate}_{args.seed}"
 model_path = os.path.join(args.save, args.data_path, model_specs, '')
 
 print(f'model_specs: {model_specs}')
@@ -346,18 +419,21 @@ print(args)
 
 criterion = Criterion(args.stage)
 
+
 def main_train():
     train_start_time = datetime.now()
     print(f"Start training at {train_start_time}")
-    
+
     input_path = INPUT_PATH
-    trainval_series     = pd.read_feather(f'{input_path}/df_nn_series_train.feather')
+    trainval_series = pd.read_feather(f'{input_path}/df_nn_series_train.feather')
     trainval_series_idx = pd.read_feather(f'{input_path}/df_nn_series_idx_train.feather').values
     trainval_y = pd.read_csv(f'{input_path}/train_labels.csv')
 
     skf = StratifiedKFold(n_splits=args.kfold, shuffle=True, random_state=args.seed)
+    fold_best_scores = []
+
     for fold_index, (trn_index, val_index) in enumerate(skf.split(trainval_y, trainval_y['target'])):
-        fold_train_start_time =  datetime.now()
+        fold_train_start_time = datetime.now()
         print(f"Start training... Fold {fold_index} at {fold_train_start_time}")
 
         teacher_model_path = None
@@ -377,24 +453,53 @@ def main_train():
             d_llm=args.d_llm,
             e_layer=args.e_layer,
             head=args.head,
-            lrate=args.lrate,
+            lrate=float(args.lrate),
             wdecay=args.weight_decay,
             device=device,
             epochs=args.epochs,
             stage=args.stage,
-            teacher_path=teacher_model_path
+            teacher_path=teacher_model_path,
+            is_training=True
         )
 
-        train_dataset = Amex_Dataset(trainval_series, [trainval_series_idx[i] for i in trn_index], trainval_y)
-        train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=False, collate_fn=train_dataset.collate_fn, num_workers=args.num_workers)
-        validation_dataset = Amex_Dataset(trainval_series, [trainval_series_idx[i] for i in val_index], trainval_y)
-        validation_dataloader = DataLoader(validation_dataset, batch_size=args.batch_size, shuffle=False, drop_last=False, collate_fn=train_dataset.collate_fn, num_workers=args.num_workers)       
+        use_embedding = args.stage in [1, 2]
 
-        loss = 9999999
+        train_dataset = Amex_Dataset(
+            trainval_series,
+            [trainval_series_idx[i] for i in trn_index],
+            trainval_y,
+            use_embedding=use_embedding
+        )
+        train_dataloader = DataLoader(
+            train_dataset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            drop_last=False,
+            collate_fn=train_dataset.collate_fn,
+            num_workers=args.num_workers
+        )
+
+        validation_dataset = Amex_Dataset(
+            trainval_series,
+            [trainval_series_idx[i] for i in val_index],
+            trainval_y,
+            use_embedding=use_embedding
+        )
+        validation_dataloader = DataLoader(
+            validation_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            drop_last=False,
+            collate_fn=validation_dataset.collate_fn,
+            num_workers=args.num_workers
+        )
+
+        best_valid_loss = float("inf")
         epochs_since_best_mse = 0
         best_score = None
         his_loss = []
         early_stopped = False
+        bestid = 0
 
         for i in range(1, args.epochs + 1):
             print(f"Staring training: fold {fold_index} - Epoch {i}")
@@ -402,20 +507,19 @@ def main_train():
             train_loss = []
             train_outputs = []
             train_ys = []
-            
+
             for _, data in enumerate(tqdm(train_dataloader)):
                 curr_train_loss, train_pred_y = engine.train(data)
                 train_loss.append(curr_train_loss)
 
                 if data['batch_series'].shape[0] == 1:
-                    train_pred_y =  torch.tensor([train_pred_y]).to(device)
+                    train_pred_y = torch.tensor([train_pred_y]).to(device)
 
                 train_outputs.append(train_pred_y)
                 train_ys.append(data['batch_y'])
 
             t2 = time.time()
-            log = "Epoch: {:03d}, Training Time: {:.4f} secs"
-            print(log.format(i, (t2 - t1)))
+            print("Epoch: {:03d}, Training Time: {:.4f} secs".format(i, (t2 - t1)))
 
             val_loss = []
             val_outputs = []
@@ -427,20 +531,19 @@ def main_train():
                 val_loss.append(curr_val_loss)
 
                 if data['batch_series'].shape[0] == 1:
-                    val_pred_y =  torch.tensor([val_pred_y]).to(device)
+                    val_pred_y = torch.tensor([val_pred_y]).to(device)
 
                 val_outputs.append(val_pred_y)
                 val_ys.append(data['batch_y'])
 
             s2 = time.time()
-            log = "Epoch: {:03d}, Validation Time: {:.4f} secs"
-            print(log.format(i, (s2 - s1)))
-        
+            print("Epoch: {:03d}, Validation Time: {:.4f} secs".format(i, (s2 - s1)))
+
             train_pre = torch.cat(train_outputs, dim=0)
             train_y = torch.cat(train_ys, dim=0)
             train_real = torch.Tensor(train_y).to(device).float()
 
-            pred = train_pre.squeeze().to(device)
+            pred = torch.sigmoid(train_pre.squeeze()).to(device)
             real = train_real.to(device)
             train_score = metric(pred.detach(), real.detach())
             print(f'train_score: {train_score}')
@@ -449,7 +552,7 @@ def main_train():
             val_y = torch.cat(val_ys, dim=0)
             val_real = torch.Tensor(val_y).to(device).float()
 
-            pred = val_pre.squeeze().to(device)
+            pred = torch.sigmoid(val_pre.squeeze()).to(device)
             real = val_real.to(device)
             val_score = metric(pred.detach(), real.detach())
             print(f'val_score: {val_score}')
@@ -459,15 +562,12 @@ def main_train():
 
             his_loss.append(mvalid_loss)
             print("-----------------------")
+            print("Epoch: {:03d}, Train Loss: {:.4f}".format(i, mtrain_loss), flush=True)
+            print("Epoch: {:03d}, Valid Loss: {:.4f}".format(i, mvalid_loss), flush=True)
 
-            log = "Epoch: {:03d}, Train Loss: {:.4f}"
-            print(log.format(i, mtrain_loss), flush=True)
-            log = "Epoch: {:03d}, Valid Loss: {:.4f}"
-            print(log.format(i, mvalid_loss), flush=True)
-
-            if mvalid_loss < loss:
+            if mvalid_loss < best_valid_loss:
                 print("###Update tasks appear###")
-                loss = mvalid_loss
+                best_valid_loss = mvalid_loss
                 torch.save(engine.model.state_dict(), model_path + f"best_model_fold_{fold_index}.pth")
                 bestid = i
                 epochs_since_best_mse = 0
@@ -480,7 +580,7 @@ def main_train():
 
             engine.scheduler.step()
 
-            if epochs_since_best_mse >= args.es_patience: # early stop
+            if epochs_since_best_mse >= args.es_patience:
                 early_stopped = True
                 print("Early Stop \n")
                 break
@@ -490,8 +590,11 @@ def main_train():
         print(f"Training ends... Fold {fold_index} at {fold_train_end_time}")
         print(f"Total train time spent for fold {fold_index}: {fold_train_duration}")
         print(f"The epoch of the best result：{bestid}")
-        print(f"The valid loss of the best model {str(round(his_loss[bestid - 1], 4))} \n", )
-    
+        print(f"The valid loss of the best model {str(round(his_loss[bestid - 1], 4))} \n")
+        print(f"The valid metric of the best model (Amex Metric, AUC): {best_score[0]:.6g}, {best_score[1]:.6g} \n")
+
+        fold_best_scores.append(best_score)
+
         log_df = create_log_df()
         log_df['fold_index'] = [fold_index]
         log_df['amex_metric'] = [f"{best_score[0]:.6g}"]
@@ -501,16 +604,32 @@ def main_train():
         log_df['fold_train_end_time'] = [fold_train_end_time.strftime('%Y-%m-%d %H:%M:%S')]
         log_df['fold_train_duration'] = [fold_train_duration]
         log_df = save_log(log_type='train', log_df=log_df)
-    
+
     train_end_time = datetime.now()
     train_duration = train_end_time - train_start_time
     print(f"Training ends at {train_end_time}")
-    print(f"Total train time spent for all folds: {train_duration} \n")    
+    print(f"Total train time spent for all folds: {train_duration} \n")
+
+    print("================ Summary of All Folds ================")
+    avg_amex = 0.0
+    avg_auc = 0.0
+    for idx, score in enumerate(fold_best_scores):
+        print(f"Fold {idx} - Amex Metric: {score[0]:.6g}, AUC: {score[1]:.6g}")
+        avg_amex += score[0]
+        avg_auc += score[1]
+
+    if len(fold_best_scores) > 0:
+        avg_amex /= len(fold_best_scores)
+        avg_auc /= len(fold_best_scores)
+        print("------------------------------------------------------")
+        print(f"Average - Metric: {avg_amex:.6g}, AUC: {avg_auc:.6g}")
+    print("======================================================\n")
+
     return log_df
 
 
 def main_test(is_predict=False):
-    test_start_time =  datetime.now()
+    test_start_time = datetime.now()
     print(f"Start Testing at {test_start_time}")
     print(f'is_predict={is_predict}')
 
@@ -519,18 +638,25 @@ def main_test(is_predict=False):
         print(f'predict input_path: {input_path}')
     else:
         input_path = INPUT_PATH
-        test_y     = pd.read_csv(f'{input_path}/test_labels.csv')['target']
+        test_y = pd.read_csv(f'{input_path}/test_labels.csv')['target']
 
-    test_series     = pd.read_feather(f'{input_path}/df_nn_series_test.feather')
+    test_series = pd.read_feather(f'{input_path}/df_nn_series_test.feather')
     test_series_idx = pd.read_feather(f'{input_path}/df_nn_series_idx_test.feather').values
 
     test_dataset = Amex_Dataset(test_series, test_series_idx)
-    test_dataloader = DataLoader(test_dataset, batch_size=args.batch_size * 8, shuffle=False, drop_last=False, collate_fn=test_dataset.collate_fn, num_workers=args.num_workers)
+    test_dataloader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size * 8,
+        shuffle=False,
+        drop_last=False,
+        collate_fn=test_dataset.collate_fn,
+        num_workers=args.num_workers
+    )
 
     models = []
     test_outputs = []
 
-    print(f'Load models...')
+    print('Load models...')
     for fold_index in range(args.kfold):
         engine = trainer(
             scaler=StandardScaler,
@@ -542,77 +668,71 @@ def main_test(is_predict=False):
             d_llm=args.d_llm,
             e_layer=args.e_layer,
             head=args.head,
-            lrate=args.lrate,
+            lrate=float(args.lrate),
             wdecay=args.weight_decay,
             device=device,
             epochs=args.epochs,
             stage=args.stage,
-            teacher_path=None  
+            teacher_path=None,
+            is_training=False
         )
-        
+
         model = engine.model
         model.load_state_dict(torch.load(model_path + f"best_model_fold_{fold_index}.pth"), strict=False)
         model.eval()
         models.append(model)
-              
 
     for _, data in enumerate(tqdm(test_dataloader)):
         with torch.no_grad():
             if data['batch_series'].shape[0] == 1:
-                # [提分彩蛋]: m(data)[2] 是Student, m(data)[3] 是Teacher
-                # 这里默认保留Student输出。如果您想做融合 Ensemble 提分，
-                # 可以改成: pred_teacher = torch.tensor([torch.stack([m(data)[3] for m in models], 0).mean(0)]).to(device)
                 pred_y = torch.tensor([torch.stack([m(data)[2] for m in models], 0).mean(0)]).to(device)
             else:
                 pred_y = torch.stack([m(data)[2] for m in models], 0).mean(0)
-                
-                # [提分彩蛋]: Teacher 模型融合代码示例：
-                # pred_student = torch.stack([m(data)[2] for m in models], 0).mean(0)
-                # pred_teacher = torch.stack([m(data)[3] for m in models], 0).mean(0)
-                # pred_y = (pred_student * 0.4) + (pred_teacher * 0.6)
-                
+
         test_outputs.append(pred_y)
 
     print(pred_y.shape)
     test_pre = torch.cat(test_outputs, dim=0)
-    pred = test_pre.squeeze().to(device)
-    
+
+    pred = torch.sigmoid(test_pre.squeeze()).to(device)
+
     if not is_predict:
         test_real = torch.Tensor(test_y).to(device).float()
         real = test_real.to(device)
         test_score = metric(pred, real)
         print(f'test_score: {test_score}')
-   
     else:
         sub = test_series[['customer_ID']].iloc[test_series_idx[:, 0]].copy()
         sub['prediction'] = pred.cpu().detach().numpy()
-        sub.to_csv(model_path+'submission.csv.zip', index=False, compression='zip')
-  
+        sub.to_csv(model_path + 'submission.csv.zip', index=False, compression='zip')
+
     test_end_time = datetime.now()
     test_duration = test_end_time - test_start_time
     print(f"Testing ends at {test_end_time}")
-    print(f"Total test time spent: {test_duration}") 
+    print(f"Total test time spent: {test_duration}")
 
     log_df = create_log_df()
     log_df['is_predict'] = [is_predict]
     if not is_predict:
         log_df['amex_metric']   = [f"{test_score[0]:.6g}"]
         log_df['AUC']           = [f"{test_score[1]:.6g}"]
-        log_type='test'
+        log_type = 'test'
     else:
         log_df['amex_metric']   = [None]
         log_df['AUC']           = [None]
-        log_type='predict'
+        log_type = 'predict'
     log_df['test_start_time'] = [test_start_time.strftime('%Y-%m-%d %H:%M:%S')]
     log_df['test_end_time'] = [test_end_time.strftime('%Y-%m-%d %H:%M:%S')]
     log_df = save_log(log_type=log_type, log_df=log_df)
     return log_df
 
+
 def create_log_df():
     log_df = pd.DataFrame()
     log_df['stage'] = [args.stage]
+    log_df['stage_name'] = [stage_name]
     log_df['model_specs'] = [model_specs]
-    log_df['log_time'] = [datetime.now().strftime('%Y-%m-%d %H:%M:%S')] 
+    log_df['log_time'] = [datetime.now().strftime('%Y-%m-%d %H:%M:%S')]
     log_df['feature_w'] = [args.feature_w]
     log_df['fcst_w'] = [args.fcst_w]
     log_df['recon_w'] = [args.recon_w]
@@ -622,22 +742,24 @@ def create_log_df():
     log_df['sampling'] = [args.sampling]
     log_df['data_type'] = [args.data_type]
     log_df['seed'] = [args.seed]
-    log_df['batch_size'] = [args.batch_size]  
-    log_df['es_patience'] = [args.es_patience]  
+    log_df['batch_size'] = [args.batch_size]
+    log_df['es_patience'] = [args.es_patience]
     log_df['emb_version'] = [args.emb_version]
+    log_df['temperature'] = [args.temperature]
     log_df['remark'] = [args.remark]
     return log_df
+
 
 def save_log(log_type='train', log_df=None):
     log_dir = './logs/experiment_log'
     if not os.path.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
-    
-    file_path = f'{log_dir}/experiment_log_{log_type}.csv'    
+
+    file_path = f'{log_dir}/experiment_log_{log_type}.csv'
     if not os.path.exists(file_path):
         log_df.to_csv(file_path, index=False)
     else:
-        log_df.to_csv(file_path, index=False, header=None, mode='a') 
+        log_df.to_csv(file_path, index=False, header=None, mode='a')
     return log_df
 
 
@@ -645,14 +767,13 @@ if __name__ == "__main__":
     log_df = None
 
     if args.train:
-        main_train()      
+        main_train()
 
     if args.test:
         if args.stage == 1:
             print('>>> 跳过测试: Stage 1 为Teacher预训练，无法在没有 Embedding 的 Test 集上进行推理。')
         elif args.data_type == 'original' and args.sampling == '100pct':
             print('Skip Test for orginal_100pct')
-            pass
         else:
             main_test()
 
@@ -670,6 +791,7 @@ if __name__ == "__main__":
                 submit_message = log_df.to_json(orient='records')
             else:
                 submit_message = f'{model_specs_template}: {model_specs}'
-            os.system(f"""kaggle competitions submit -c amex-default-prediction -f {model_path}/submission.csv.zip -m '{submit_message}'""")
+            os.system(
+                f"""kaggle competitions submit -c amex-default-prediction -f {model_path}/submission.csv.zip -m '{submit_message}'"""
+            )
             print("\n")
-            pass

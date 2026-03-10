@@ -67,7 +67,7 @@ class Amodel(nn.Module):
                                          ,nn.LeakyReLU()
                                          
                                          ,nn.Linear(1*hidden_dim, target_num)
-                                         ,nn.Sigmoid()
+                                         # [FIX] 移除 nn.Sigmoid()，输出 Logits
                                          )
         self.output_block_t = nn.Sequential(
                                          nn.BatchNorm1d(1*hidden_dim)
@@ -79,7 +79,7 @@ class Amodel(nn.Module):
                                          ,nn.LeakyReLU()
                                          
                                          ,nn.Linear(1*hidden_dim, target_num)
-                                         ,nn.Sigmoid()
+                                         # [FIX] 移除 nn.Sigmoid()，输出 Logits
                                          )
 
     def param_num(self):
@@ -126,11 +126,11 @@ class Amodel(nn.Module):
             ## teacher
             x_emb = data['batch_emb_tensor'].to(self.device)
             
-            # [核心改动] Teacher 特征融合！同时处理文本与数值，直接相加融合
-            t_raw_enc = self.input_series_block_n1_t_raw(x_series) # 提取数值特征 [B, S, H]
-            t_emb_enc = self.input_series_block_n1_t(x_emb)        # 提取LLM特征 [B, S, H]
+            # Teacher 特征融合
+            t_raw_enc = self.input_series_block_n1_t_raw(x_series) 
+            t_emb_enc = self.input_series_block_n1_t(x_emb)        
             
-            x1_tsf_enc_t = t_raw_enc + t_emb_enc                   # 文本常识与精确数值的完美融合
+            x1_tsf_enc_t = t_raw_enc + t_emb_enc                   
             
             x1_tsf_enc_t = x1_tsf_enc_t.permute(1, 0, 2) 
             x1_tsf_t     = self.transformer_encoder_t(x1_tsf_enc_t) 

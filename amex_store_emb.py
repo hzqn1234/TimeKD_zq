@@ -260,9 +260,8 @@ def parse_args():
     parser.add_argument("--allow_truncate", type=int, default=0, help="0: 不允许截断 (可能OOM), 1: 允许截断并在发生时发出警告")
     parser.add_argument("--chunk_id", type=int, default=0)
     parser.add_argument("--total_chunks", type=int, default=1)
-    
-    # [新增] 接收外部传入的 emb_version 参数
-    parser.add_argument("--emb_version", type=str, default="v7") 
+    parser.add_argument("--emb_version", type=str, default="v8") 
+    parser.add_argument("--train_test", type=str, default="train", choices=["train", "test"], help="Specify whether to process train or test dataset")
 
     return parser.parse_args()
 
@@ -408,7 +407,7 @@ if __name__ == "__main__":
 
     args = parse_args()
     print(args)
-    save_train_embeddings(args, 'train')
+    save_train_embeddings(args, args.train_test)
 
     t2 = datetime.now()
     duration = t2 - t1
