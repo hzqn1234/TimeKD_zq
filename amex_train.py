@@ -293,7 +293,8 @@ class trainer:
                     print("Test/Predict phase initialized (Teacher weights will be loaded with the whole model).")
             else:
                 if is_training:
-                    print(f"WARNING: Valid Teacher path not provided for Stage 2! ({teacher_path})")
+                    # print(f"WARNING: Valid Teacher path not provided for Stage 2! ({teacher_path})")
+                    raise ValueError(f"WARNING: Valid Teacher path not provided for Stage 2! ({teacher_path})")
 
             for param in self.model.input_series_block_n1_t.parameters():
                 param.requires_grad = False
