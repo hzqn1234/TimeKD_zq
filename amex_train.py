@@ -338,7 +338,7 @@ class trainer:
             self.model.transformer_encoder_t.eval()
             self.model.output_block_t.eval()
 
-        ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(data)
+        ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(data, stage=self.stage)
         y = data['batch_y'].to(self.device)
 
         if data['batch_series'].shape[0] == 1:
@@ -359,7 +359,7 @@ class trainer:
         self.model.eval()
 
         with torch.no_grad():
-            ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(data)
+            ts_enc, prompt_enc, ts_out, prompt_out, ts_att, prompt_att = self.model(data, stage=self.stage)
             y = data['batch_y'].to(self.device)
 
             if data['batch_series'].shape[0] == 1:

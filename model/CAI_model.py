@@ -96,7 +96,7 @@ class Amodel(nn.Module):
         
         return torch.stack(pooling_feature,0)
 
-    def forward(self, data):
+    def forward(self, data, stage=0):
         x_series = data['batch_series'].to(self.device)
         mask = data['batch_mask'].to(self.device)
 
@@ -115,13 +115,19 @@ class Amodel(nn.Module):
 
         else:
             ## student
-            x1_tsf_enc = self.input_series_block_n1(x_series)
-            x1_tsf_enc = x1_tsf_enc.permute(1, 0, 2) 
-            x1_tsf     = self.transformer_encoder(x1_tsf_enc) 
-            x1_tsf_pool = self.transformer_pooling(x1_tsf, mask) 
-            y = self.output_block(x1_tsf_pool).squeeze(1)            
-            
-            ts_att_matrix = self.transformer_encoder.layers[-1].self_attn.saved_attn_weights
+            if stage == 1:
+                # 仅执行 Teacher 计算，将 Student 相关输出设为 None
+                x1_tsf_enc = None
+                y = None
+                ts_att_matrix = None
+            else:
+                # Stage 2/3: 正常执行 Student 计算
+                x1_tsf_enc = self.input_series_block_n1(x_series)
+                x1_tsf_enc = x1_tsf_enc.permute(1, 0, 2) 
+                x1_tsf     = self.transformer_encoder(x1_tsf_enc) 
+                x1_tsf_pool = self.transformer_pooling(x1_tsf, mask) 
+                y = self.output_block(x1_tsf_pool).squeeze(1)            
+                ts_att_matrix = self.transformer_encoder.layers[-1].self_attn.saved_attn_weights
 
             ## teacher
             x_emb = data['batch_emb_tensor'].to(self.device)
