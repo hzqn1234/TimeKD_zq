@@ -1,16 +1,16 @@
 #!/bin/sh
 
 #SBATCH -o gpu-job-train-3.output
-#SBATCH -p NV100q
+#SBATCH -p PA100q
 #SBATCH --gpus-per-node=1
 #SBATCH -n 1
 #SBATCH -c 8
-#SBATCH -w node17
+#SBATCH -w node02
 
-GPU_ID=3
+GPU_ID=5
 SAMPLING="100pct"
-# LRs="1e-3 5e-4 1e-4 5e-5"
-LRs="1e-4 5e-5"
+LRs="1e-3 5e-4 1e-4 5e-5"
+# LRs="5e-4 1e-4 5e-5"
 EMB_version="v8"
 
 for lr in $LRs
@@ -21,9 +21,9 @@ do
     
     for seed in 42
     do 
-        # echo "========================================"
-        # echo "   Stage 1: Teacher Pre-training (seed: $seed)"
-        # echo "========================================"
+        echo "========================================"
+        echo "   Stage 1: Teacher Pre-training (seed: $seed)"
+        echo "========================================"
         
         # 第一阶段：只关注 Teacher 的拟合 (recon_w=1)，其余全部设0
         CUDA_VISIBLE_DEVICES=$GPU_ID \
@@ -47,7 +47,7 @@ do
             --att_w 0.0 \
             --distill_w 0.0 \
             --emb_version "$EMB_version" \
-            --remark "Stage 1 Pretrain Teacher" \
+            --remark "Stage 1 Pretrain Teacher, gru pooling" \
             --epochs 20 
             
 
@@ -88,9 +88,8 @@ do
             --distill_w 1.0 \
             --temperature 5.0 \
             --emb_version "$EMB_version" \
-            --remark "Stage 2 Distillation, shift sigmoid" \
+            --remark "Stage 2 Distillation, gru pooling" \
             --epochs 20 
-
 
         echo "========================================"
         echo "   Stage 3: Student-only Baseline (seed: $seed)"
@@ -118,7 +117,7 @@ do
             --distill_w 0.0 \
             --temperature 5.0 \
             --emb_version "$EMB_version" \
-            --remark "Stage 3 Student-only baseline" \
+            --remark "Stage 3 Student-only baseline, gru pooling" \
             --epochs 20
     done
 done

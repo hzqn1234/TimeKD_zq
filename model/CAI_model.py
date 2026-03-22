@@ -51,6 +51,9 @@ class Amodel(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=3)
         self.transformer_encoder_t = nn.TransformerEncoder(encoder_layer, num_layers=3)
 
+        self.gru_series = nn.GRU(hidden_dim, hidden_dim, batch_first=True, bidirectional=True)
+        self.gru_series_t = nn.GRU(hidden_dim, hidden_dim, batch_first=True, bidirectional=True)
+
         last_layer_s = self.transformer_encoder.layers[-1]
         last_layer_s.self_attn = SelfAttnWrapper(last_layer_s.self_attn)
         
@@ -58,8 +61,8 @@ class Amodel(nn.Module):
         last_layer_t.self_attn = SelfAttnWrapper(last_layer_t.self_attn)
 
         self.output_block = nn.Sequential(
-                                         nn.BatchNorm1d(1*hidden_dim)
-                                         ,nn.Linear(1*hidden_dim, 1*hidden_dim)
+                                         nn.BatchNorm1d(2*hidden_dim)
+                                         ,nn.Linear(2*hidden_dim, 1*hidden_dim)
                                          ,nn.Dropout(0.05)
                                          ,nn.LeakyReLU()
 
@@ -70,8 +73,8 @@ class Amodel(nn.Module):
                                          # [FIX] 移除 nn.Sigmoid()，输出 Logits
                                          )
         self.output_block_t = nn.Sequential(
-                                         nn.BatchNorm1d(1*hidden_dim)
-                                         ,nn.Linear(1*hidden_dim, 1*hidden_dim)
+                                         nn.BatchNorm1d(2*hidden_dim)
+                                         ,nn.Linear(2*hidden_dim, 1*hidden_dim)
                                          ,nn.Dropout(0.05)
                                          ,nn.LeakyReLU()
 
@@ -96,15 +99,40 @@ class Amodel(nn.Module):
         
         return torch.stack(pooling_feature,0)
 
+    def batch_gru(self,series,mask, gru_series=None):
+        node_num = mask.sum(dim=-1).detach().cpu()
+        pack = nn.utils.rnn.pack_padded_sequence(series, node_num, batch_first=True, enforce_sorted=False)
+        message,hidden = gru_series(pack)
+        pooling_feature = []
+
+        for i,n in enumerate(node_num.numpy()):
+            n = int(n)
+            bi = 0
+
+            si = message.unsorted_indices[i]
+            for k in range(n):
+
+                if k == n-1:
+                    sample_feature = message.data[bi+si]
+                bi = bi + message.batch_sizes[k]
+
+            pooling_feature.append(sample_feature)
+        return torch.stack(pooling_feature,0)
+
     def forward(self, data, stage=0):
         x_series = data['batch_series'].to(self.device)
         mask = data['batch_mask'].to(self.device)
 
         if data['batch_emb_tensor'] is None:
+            # raise ValueError("batch_emb_tensor 不能为空！请检查数据输入。")
             x1_tsf_enc = self.input_series_block_n1(x_series) 
             x1_tsf_enc = x1_tsf_enc.permute(1, 0, 2) 
             x1_tsf     = self.transformer_encoder(x1_tsf_enc) 
-            x1_tsf_pool = self.transformer_pooling(x1_tsf, mask) 
+
+            # x1_tsf_pool = self.transformer_pooling(x1_tsf, mask) 
+            x1_tsf = x1_tsf.permute(1, 0, 2)
+            x1_tsf_pool = self.batch_gru(x1_tsf,mask, gru_series=self.gru_series)
+            
             y = self.output_block(x1_tsf_pool).squeeze(1)
 
             x1_tsf_enc_t = None
@@ -125,7 +153,11 @@ class Amodel(nn.Module):
                 x1_tsf_enc = self.input_series_block_n1(x_series)
                 x1_tsf_enc = x1_tsf_enc.permute(1, 0, 2) 
                 x1_tsf     = self.transformer_encoder(x1_tsf_enc) 
-                x1_tsf_pool = self.transformer_pooling(x1_tsf, mask) 
+                
+                # x1_tsf_pool = self.transformer_pooling(x1_tsf, mask) 
+                x1_tsf = x1_tsf.permute(1, 0, 2)
+                x1_tsf_pool = self.batch_gru(x1_tsf,mask, gru_series=self.gru_series)
+
                 y = self.output_block(x1_tsf_pool).squeeze(1)            
                 ts_att_matrix = self.transformer_encoder.layers[-1].self_attn.saved_attn_weights
 
@@ -140,7 +172,11 @@ class Amodel(nn.Module):
             
             x1_tsf_enc_t = x1_tsf_enc_t.permute(1, 0, 2) 
             x1_tsf_t     = self.transformer_encoder_t(x1_tsf_enc_t) 
-            x1_tsf_pool_t = self.transformer_pooling(x1_tsf_t, mask) 
+
+            # x1_tsf_pool_t = self.transformer_pooling(x1_tsf_t, mask) 
+            x1_tsf_t = x1_tsf_t.permute(1, 0, 2)
+            x1_tsf_pool_t = self.batch_gru(x1_tsf_t,mask, gru_series=self.gru_series_t)
+
             y_t = self.output_block_t(x1_tsf_pool_t).squeeze(1)
             
             prompt_att_matrix = self.transformer_encoder_t.layers[-1].self_attn.saved_attn_weights
