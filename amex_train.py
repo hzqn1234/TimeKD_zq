@@ -669,7 +669,7 @@ def main_test(is_predict=False):
     
     test_dataloader = DataLoader(
         test_dataset,
-        batch_size=args.batch_size * 8, # 保留原有的加速设定
+        batch_size=args.batch_size * 32, # 保留原有的加速设定
         shuffle=False,
         drop_last=False,
         collate_fn=test_dataset.collate_fn,
