@@ -9,8 +9,8 @@
 
 GPU_ID=5
 SAMPLING="100pct"
-LRs="1e-3 5e-4 1e-4 5e-5"
-# LRs="5e-4 1e-4 5e-5"
+# LRs="1e-3 5e-4 1e-4 5e-5"
+LRs="1e-4"
 EMB_version="v8"
 
 for lr in $LRs
