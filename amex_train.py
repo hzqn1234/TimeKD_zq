@@ -172,8 +172,12 @@ class Amex_Dataset:
 
     def collate_fn(self, batch):
         batch_size = len(batch)
-        batch_series = torch.zeros((batch_size, 13, batch[0]['SERIES'].shape[1]))
-        batch_mask = torch.zeros((batch_size, 13))
+
+        # Dynamically get the max sequence length in this batch instead of hardcoding 13
+        max_batch_len = max([item['SERIES'].shape[0] for item in batch])
+
+        batch_series = torch.zeros((batch_size, max_batch_len, batch[0]['SERIES'].shape[1]))
+        batch_mask = torch.zeros((batch_size, max_batch_len))
         batch_y = torch.zeros(batch_size)
         batch_idx = np.array([sample['idx'] for sample in batch])
 
@@ -390,6 +394,29 @@ def seed_it(seed):
     torch.manual_seed(seed)
     torch.backends.cudnn.benchmark = False
 
+def create_short_seq_train_indices(uidxs, max_len=5):
+    """Augments training data by slicing long sequences to their last N months."""
+    new_uidxs = []
+    for i1, i2, cust_id in uidxs:
+        seq_len = i2 - i1 + 1
+        if seq_len <= max_len:
+            # Keep natural short sequences exactly as they are
+            new_uidxs.append([i1, i2, cust_id])
+        else:
+            # For long sequences, extract only the LAST `max_len` months
+            new_i1 = i2 - max_len + 1
+            new_uidxs.append([new_i1, i2, cust_id])
+    return np.array(new_uidxs)
+
+def filter_short_seq_test_indices(uidxs, max_len=5):
+    """Filters test data to ONLY include natural short sequences."""
+    new_uidxs = []
+    for i1, i2, cust_id in uidxs:
+        seq_len = i2 - i1 + 1
+        if seq_len <= max_len:
+            new_uidxs.append([i1, i2, cust_id])
+    return np.array(new_uidxs)
+
 
 args = parse_args()
 INPUT_PATH = f'../../000_data/amex/{args.data_type}_{args.sampling}'
@@ -413,8 +440,8 @@ stage_name_map = {
 }
 stage_name = stage_name_map.get(args.stage, f"stage{args.stage}")
 
-model_specs_template =  "S{args.stage}_{stage_name}_{args.data_type}_{args.emb_version}_{args.sampling}_{args.lrate}_{args.seed}"
-model_specs          = f"S{args.stage}_{stage_name}_{args.data_type}_{args.emb_version}_{args.sampling}_{args.lrate}_{args.seed}"
+model_specs_template =  "S{args.stage}_{stage_name}_{args.data_type}_{args.emb_version}_{args.seq_len}_{args.sampling}_{args.lrate}_{args.seed}"
+model_specs          = f"S{args.stage}_{stage_name}_{args.data_type}_{args.emb_version}_{args.seq_len}_{args.sampling}_{args.lrate}_{args.seed}"
 model_path = os.path.join(args.save, args.data_path, model_specs, '')
 
 print(f'model_specs: {model_specs}')
@@ -435,6 +462,11 @@ def main_train():
     trainval_series = pd.read_feather(f'{input_path}/df_nn_series_train.feather')
     trainval_series_idx = pd.read_feather(f'{input_path}/df_nn_series_idx_train.feather').values
     trainval_y = pd.read_csv(f'{input_path}/train_labels.csv')
+
+    # Process indices for the <= 5 month model
+    print(f"Original training samples: {len(trainval_series_idx)}")
+    trainval_series_idx = create_short_seq_train_indices(trainval_series_idx, max_len=5)
+    print(f"Augmented short-seq samples: {len(trainval_series_idx)}")
 
     skf = StratifiedKFold(n_splits=args.kfold, shuffle=True, random_state=args.seed)
     fold_best_scores = []
@@ -660,6 +692,9 @@ def main_test(is_predict=False):
 
     test_series = pd.read_feather(f'{input_path}/df_nn_series_test.feather')
     test_series_idx = pd.read_feather(f'{input_path}/df_nn_series_idx_test.feather').values
+
+    # [NEW] Filter to only evaluate on natural short-sequence customers
+    test_series_idx = filter_short_seq_test_indices(test_series_idx, max_len=5)
 
     # 如果当前是 Stage 1 (教师模型)，则必须启用 embedding
     use_emb_flag = True if args.stage == 1 else False
