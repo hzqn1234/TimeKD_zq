@@ -469,7 +469,7 @@ def main_train():
 
     # Process indices for the <= 5 month model
     print(f"Original training samples: {len(trainval_series_idx)}")
-    trainval_series_idx = create_short_seq_train_indices(trainval_series_idx, max_len=5)
+    trainval_series_idx = create_short_seq_train_indices(trainval_series_idx, max_len=args.seq_len)
     print(f"Augmented short-seq samples: {len(trainval_series_idx)}")
 
     skf = StratifiedKFold(n_splits=args.kfold, shuffle=True, random_state=args.seed)
