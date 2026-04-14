@@ -117,7 +117,8 @@ do
             --distill_w 0.0 \
             --temperature 5.0 \
             --emb_version "$EMB_version" \
-            --remark "Stage 3 Student-only baseline, gru pooling" \
+            --seq_len 5
+            --remark "Stage 3 Student-only baseline, gru pooling, thin profile seq_len=5" \
             --epochs 20
     done
 done
