@@ -398,7 +398,7 @@ def create_short_seq_train_indices(uidxs, max_len=5):
     """Augments training data by slicing long sequences to their last N months."""
     new_uidxs = []
     for i1, i2, cust_id in uidxs:
-        seq_len = i2 - i1 + 1
+        seq_len = int(i2) - int(i1) + 1
         if seq_len <= max_len:
             # Keep natural short sequences exactly as they are
             new_uidxs.append([i1, i2, cust_id])
@@ -413,7 +413,7 @@ def filter_short_seq_test_indices(uidxs, max_len=5):
     new_uidxs = []
     keep_mask = []
     for i1, i2, cust_id in uidxs:
-        seq_len = i2 - i1 + 1
+        seq_len = int(i2) - int(i1) + 1
         if seq_len <= max_len:
             new_uidxs.append([i1, i2, cust_id])
             keep_mask.append(True)
