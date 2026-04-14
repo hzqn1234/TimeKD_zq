@@ -409,13 +409,17 @@ def create_short_seq_train_indices(uidxs, max_len=5):
     return np.array(new_uidxs)
 
 def filter_short_seq_test_indices(uidxs, max_len=5):
-    """Filters test data to ONLY include natural short sequences."""
+    """Filters test data to ONLY include natural short sequences and returns a mask."""
     new_uidxs = []
+    keep_mask = []
     for i1, i2, cust_id in uidxs:
         seq_len = i2 - i1 + 1
         if seq_len <= max_len:
             new_uidxs.append([i1, i2, cust_id])
-    return np.array(new_uidxs)
+            keep_mask.append(True)
+        else:
+            keep_mask.append(False)
+    return np.array(new_uidxs), np.array(keep_mask)
 
 
 args = parse_args()
@@ -693,8 +697,15 @@ def main_test(is_predict=False):
     test_series = pd.read_feather(f'{input_path}/df_nn_series_test.feather')
     test_series_idx = pd.read_feather(f'{input_path}/df_nn_series_idx_test.feather').values
 
-    # [NEW] Filter to only evaluate on natural short-sequence customers
-    test_series_idx = filter_short_seq_test_indices(test_series_idx, max_len=5)
+    # [CHANGE] Unpack the mask and use args.seq_len dynamically
+    test_series_idx, keep_mask = filter_short_seq_test_indices(test_series_idx, max_len=args.seq_len)
+
+    if not is_predict:
+        input_path = INPUT_PATH
+        test_y = pd.read_csv(f'{input_path}/test_labels.csv')['target']
+        # [NEW] Filter the labels so they match the predictions!
+        test_y = test_y[keep_mask].values
+        local_emb_path = emb_path
 
     # 如果当前是 Stage 1 (教师模型)，则必须启用 embedding
     use_emb_flag = True if args.stage == 1 else False
@@ -766,7 +777,14 @@ def main_test(is_predict=False):
     else:
         sub = test_series[['customer_ID']].iloc[test_series_idx[:, 0]].copy()
         sub['prediction'] = pred.cpu().detach().numpy()
-        sub.to_csv(model_path + 'submission.csv.zip', index=False, compression='zip')
+
+        # Dynamically name the submission file based on seq_len
+        if args.seq_len == 13:
+            file_name = 'submission.csv.zip'
+        else:
+            file_name = f'submission_short_seq_{args.seq_len}.csv.zip'
+
+        sub.to_csv(os.path.join(model_path, file_name), index=False, compression='zip')
 
     test_end_time = datetime.now()
     test_duration = test_end_time - test_start_time
