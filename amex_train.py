@@ -691,7 +691,6 @@ def main_test(is_predict=False):
             local_emb_path = None
     else:
         input_path = INPUT_PATH
-        test_y = pd.read_csv(f'{input_path}/test_labels.csv')['target']
         local_emb_path = emb_path  # 普通 test 使用全局原本解析好的路径
 
     test_series = pd.read_feather(f'{input_path}/df_nn_series_test.feather')
@@ -701,11 +700,8 @@ def main_test(is_predict=False):
     test_series_idx, keep_mask = filter_short_seq_test_indices(test_series_idx, max_len=args.seq_len)
 
     if not is_predict:
-        input_path = INPUT_PATH
-        test_y = pd.read_csv(f'{input_path}/test_labels.csv')['target']
-        # [NEW] Filter the labels so they match the predictions!
-        test_y = test_y[keep_mask].values
-        local_emb_path = emb_path
+        test_y_full = pd.read_csv(f'{input_path}/test_labels.csv')['target']
+        test_y = test_y_full[keep_mask].values
 
     # 如果当前是 Stage 1 (教师模型)，则必须启用 embedding
     use_emb_flag = True if args.stage == 1 else False
@@ -859,11 +855,16 @@ if __name__ == "__main__":
         log_df = main_test(is_predict=True)
 
     if args.submit:
-        if log_df is not None:
-            submit_message = log_df.to_json(orient='records')
+        if args.seq_len != 13:
+            print(f"\n[WARNING] Skipping Kaggle submission. You are running a partial model (seq_len={args.seq_len}).")
+            print("You must ensemble this output with your main 13-month model before submitting to Kaggle!")
         else:
-            submit_message = f'{model_specs_template}: {model_specs}'
-        os.system(
-            f"""kaggle competitions submit -c amex-default-prediction -f {model_path}/submission.csv.zip -m '{submit_message}'"""
-        )
-        print("\n")
+            if log_df is not None:
+                submit_message = log_df.to_json(orient='records')
+            else:
+                submit_message = f'{model_specs_template}: {model_specs}'
+            
+            os.system(
+                f"""kaggle competitions submit -c amex-default-prediction -f {model_path}/submission.csv.zip -m '{submit_message}'"""
+            )
+            print("\n")
