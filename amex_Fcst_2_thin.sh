@@ -1,16 +1,16 @@
 #!/bin/sh
 
-#SBATCH -o gpu-job-train-2.output
+#SBATCH -o gpu-job-train-2-thin.output
 #SBATCH -p PA100q
 #SBATCH --gpus-per-node=1
 #SBATCH -n 1
 #SBATCH -c 8
 #SBATCH -w node02
 
-GPU_ID=4
-SAMPLING="10pct"
-LRs="1e-3 5e-4 1e-4 5e-5"
-# LRs="5e-4 1e-4 5e-5"
+GPU_ID=0
+SAMPLING="100pct"
+# LRs="1e-3 5e-4 1e-4 5e-5"
+LRs="1e-4"
 EMB_version="v8"
 
 for lr in $LRs
@@ -117,8 +117,8 @@ do
             --distill_w 0.0 \
             --temperature 5.0 \
             --emb_version "$EMB_version" \
-            --seq_len 5
-            --remark "Stage 3 Student-only baseline, gru pooling, thin profile seq_len=5" \
+            --seq_len 12 \
+            --remark "Stage 3 Student-only baseline, gru pooling, thin profile seq_len=12" \
             --epochs 20
     done
 done

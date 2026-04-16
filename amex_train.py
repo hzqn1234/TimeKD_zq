@@ -773,12 +773,7 @@ def main_test(is_predict=False):
     else:
         sub = test_series[['customer_ID']].iloc[test_series_idx[:, 0]].copy()
         sub['prediction'] = pred.cpu().detach().numpy()
-
-        # Dynamically name the submission file based on seq_len
-        if args.seq_len == 13:
-            file_name = 'submission.csv.zip'
-        else:
-            file_name = f'submission_short_seq_{args.seq_len}.csv.zip'
+        file_name = 'submission.csv.zip'
 
         sub.to_csv(os.path.join(model_path, file_name), index=False, compression='zip')
 
@@ -797,8 +792,8 @@ def main_test(is_predict=False):
         log_df['amex_metric']   = [None]
         log_df['AUC']           = [None]
         log_type = 'predict'
-    log_df['test_start_time'] = [test_start_time.strftime('%Y-%m-%d %H:%M:%S')]
-    log_df['test_end_time'] = [test_end_time.strftime('%Y-%m-%d %H:%M:%S')]
+    # log_df['test_start_time'] = [test_start_time.strftime('%Y-%m-%d %H:%M:%S')]
+    # log_df['test_end_time'] = [test_end_time.strftime('%Y-%m-%d %H:%M:%S')]
     log_df = save_log(log_type=log_type, log_df=log_df)
     return log_df
 
@@ -823,6 +818,7 @@ def create_log_df():
     log_df['emb_version'] = [args.emb_version]
     log_df['temperature'] = [args.temperature]
     log_df['remark'] = [args.remark]
+    log_df['seq_len'] = [args.seq_len]
     return log_df
 
 

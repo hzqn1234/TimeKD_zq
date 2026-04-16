@@ -7,8 +7,11 @@
 
 #SBATCH -n 1
 #SBATCH -c 4
-#SBATCH -w node03
+#SBATCH -w node02
 
-CUDA_VISIBLE_DEVICES=2 \
-python -u S7_ensemble.py
+CUDA_VISIBLE_DEVICES=0 \
+python -u S7_ensemble_thin.py
+
+# CUDA_VISIBLE_DEVICES=2 \
+# python -u S7_ensemble.py
 
