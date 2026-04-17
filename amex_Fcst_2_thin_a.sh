@@ -1,13 +1,13 @@
 #!/bin/sh
 
-#SBATCH -o gpu-job-train-2-thin.output
+#SBATCH -o gpu-job-train-2-thin-a.output
 #SBATCH -p RTXA6Kq
 #SBATCH --gpus-per-node=1
 #SBATCH -n 1
 #SBATCH -c 8
 #SBATCH -w node08
 
-GPU_ID=0
+GPU_ID=1
 SAMPLING="100pct"
 # LRs="1e-3 5e-4 1e-4 5e-5"
 LRs="1e-4"
@@ -95,7 +95,7 @@ do
         echo "   Stage 3: Student-only Baseline (seed: $seed)"
         echo "========================================"
 
-        for seq in 13 12 11 10 9 8
+        for seq in 7 6 5 4 3 2 1
         do
             echo "----------------------------------------"
             echo "   Training & Predicting Exact Length: $seq"

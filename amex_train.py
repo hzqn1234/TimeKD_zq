@@ -394,27 +394,36 @@ def seed_it(seed):
     torch.manual_seed(seed)
     torch.backends.cudnn.benchmark = False
 
-def create_short_seq_train_indices(uidxs, max_len=5):
-    """Augments training data by slicing long sequences to their last N months."""
+
+def create_exact_seq_train_indices(uidxs, target_len):
+    """Creates training data where EVERY sequence is exactly target_len months."""
     new_uidxs = []
+    keep_mask = [] # <--- [NEW] Track what we keep
+    
     for i1, i2, cust_id in uidxs:
         seq_len = int(i2) - int(i1) + 1
-        if seq_len <= max_len:
-            # Keep natural short sequences exactly as they are
+        
+        if seq_len == target_len:
             new_uidxs.append([i1, i2, cust_id])
-        else:
-            # For long sequences, extract only the LAST `max_len` months
-            new_i1 = i2 - max_len + 1
+            keep_mask.append(True)
+        elif seq_len > target_len:
+            new_i1 = int(i2) - target_len + 1
             new_uidxs.append([new_i1, i2, cust_id])
-    return np.array(new_uidxs)
+            keep_mask.append(True)
+        else:
+            # We skip this user, so mark False
+            keep_mask.append(False) 
+            
+    return np.array(new_uidxs), np.array(keep_mask) # <--- [NEW] Return the mask
 
-def filter_short_seq_test_indices(uidxs, max_len=5):
-    """Filters test data to ONLY include natural short sequences and returns a mask."""
+def filter_exact_seq_test_indices(uidxs, target_len):
+    """Filters test data to ONLY include sequences of exactly target_len."""
     new_uidxs = []
     keep_mask = []
     for i1, i2, cust_id in uidxs:
         seq_len = int(i2) - int(i1) + 1
-        if seq_len <= max_len:
+        
+        if seq_len == target_len:
             new_uidxs.append([i1, i2, cust_id])
             keep_mask.append(True)
         else:
@@ -467,10 +476,14 @@ def main_train():
     trainval_series_idx = pd.read_feather(f'{input_path}/df_nn_series_idx_train.feather').values
     trainval_y = pd.read_csv(f'{input_path}/train_labels.csv')
 
-    # Process indices for the <= 5 month model
+    # [MODIFIED] Unpack the mask
     print(f"Original training samples: {len(trainval_series_idx)}")
-    trainval_series_idx = create_short_seq_train_indices(trainval_series_idx, max_len=args.seq_len)
-    print(f"Augmented short-seq samples: {len(trainval_series_idx)}")
+    trainval_series_idx, keep_mask = create_exact_seq_train_indices(trainval_series_idx, target_len=args.seq_len)
+    print(f"Exact {args.seq_len}-seq samples: {len(trainval_series_idx)}")
+
+    # [CRITICAL FIX] Drop the skipped users from the labels dataframe!
+    # We use .copy() to prevent pandas SettingWithCopy warnings later
+    trainval_y = trainval_y[keep_mask].copy()
 
     skf = StratifiedKFold(n_splits=args.kfold, shuffle=True, random_state=args.seed)
     fold_best_scores = []
@@ -696,8 +709,8 @@ def main_test(is_predict=False):
     test_series = pd.read_feather(f'{input_path}/df_nn_series_test.feather')
     test_series_idx = pd.read_feather(f'{input_path}/df_nn_series_idx_test.feather').values
 
-    # [CHANGE] Unpack the mask and use args.seq_len dynamically
-    test_series_idx, keep_mask = filter_short_seq_test_indices(test_series_idx, max_len=args.seq_len)
+    # Unpack the mask and use args.seq_len dynamically for exact matching
+    test_series_idx, keep_mask = filter_exact_seq_test_indices(test_series_idx, target_len=args.seq_len)
 
     if not is_predict:
         test_y_full = pd.read_csv(f'{input_path}/test_labels.csv')['target']
