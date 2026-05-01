@@ -8,11 +8,19 @@ import gc,os,random
 import time,datetime
 from tqdm import tqdm
 
+# /export/home2/zongqi001/007_amex_rank1/lgbm/output/LGB_with_manual_feature/__0.80792__submission.csv.zip
+# /export/home2/zongqi001/007_amex_rank1/lgbm/output/LGB_with_manual_feature_and_series_oof/__0.80784__submission.csv.zip
 
-p0_file_path = '../../005_best/ensemble__0.80987/__0.80824__lgb_manual__submission.csv.zip'
-p1_file_path = '../../005_best/ensemble__0.80987/__0.80866__lgb_fe__submission.csv.zip'
-# p2_file_path = '../../005_best/ensemble__0.80987/__0.80141__tsf_series__submission.csv.zip'
-p2_file_path = './logs/Amex/S2_distill_original_v8_100pct_1e-4_42/submission.csv.zip'
+# p0_file_path = '../../005_best/ensemble__0.80987/__0.80824__lgb_manual__submission.csv.zip'
+# p1_file_path = '../../005_best/ensemble__0.80987/__0.80866__lgb_fe__submission.csv.zip'
+
+# p2_file_path = './logs/Amex/S2_distill_original_v8_100pct_1e-4_42/submission.csv.zip'
+# p2_file_path = '/export/home2/zongqi001/004_TimeKD/TimeKD_02/logs/Amex/S3_student_original_v8_AllMerged_100pct_1e-4_42/submission.csv.zip'
+# p2_file_path = './logs/Amex/S3_student_original_v8_10and13_100pct_1e-4_42/final_merged_submission.csv.zip'
+
+p0_file_path = '../../007_amex_rank1/lgbm/output/LGB_with_manual_feature/__0.80792__submission.csv.zip'
+p1_file_path = '../../007_amex_rank1/lgbm/output/LGB_with_manual_feature_and_series_oof/__0.80784__submission.csv.zip'
+p2_file_path = '../../005_best/ensemble__0.80987/__0.80141__tsf_series__submission.csv.zip'
 p3_file_path = '../../005_best/ensemble__0.80987/__0.80558__tsf_fe__submission.csv.zip'
 
 # os.system(f"""kaggle competitions submit -c amex-default-prediction -f {p0_file_path} -m 'last time best ensemble - p0'""")
