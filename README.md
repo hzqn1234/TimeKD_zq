@@ -6,7 +6,8 @@ This repository adpats the code from TimeKD [repo](https://github.com/ChenxiLiu-
 
 There are generally 3 steps to run the code:
 - sbatch preprocess/run.sh
-- sbatch amex_Store_1.sh
+- sbatch amex_Store_1_train.sh
+- sbatch amex_Store_1_test.sh
 - sbatch amex_Fcst_1.sh
 
 ------------------
